@@ -40,6 +40,15 @@ const api: NbApi = {
     readJson: <T = unknown>(req: IpcReq<'artifact:read-json'>) =>
       invoke('artifact:read-json', req) as Promise<T>,
   },
+  source: {
+    list: (req) => invoke('source:list', req),
+  },
+  system: {
+    openSource: (req) => invoke('system:open-source', req),
+  },
+  search: {
+    query: (req) => invoke('search:query', req),
+  },
   files: {
     getPathForFile: (file) => webUtils.getPathForFile(file),
   },

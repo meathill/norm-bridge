@@ -1,0 +1,201 @@
+import type {
+  ChatInspectionMessage,
+  ChatJobMessage,
+  ChatSearchResultMessage,
+} from '@shared/domain/chat';
+import type { JobEvent } from '@shared/domain/job';
+import { nextChatId, useChatStore } from '@/stores/chat.store';
+import { useJobStore } from '@/stores/job.store';
+
+/**
+ * Drop one or more PDF paths into the chat. Each file is imported (which
+ * registers + inspects it) and a corresponding inspection bubble is appended.
+ */
+export async function importDroppedFiles(filePaths: string[]): Promise<void> {
+  for (const filePath of filePaths) {
+    const fileName = filePath.split(/[/\\]/).pop() ?? filePath;
+    useChatStore.getState().append({
+      id: nextChatId('msg'),
+      type: 'user-file',
+      createdAt: new Date().toISOString(),
+      fileName,
+      filePath,
+    });
+
+    try {
+      const result = await window.nb.import.standardPdf({ filePath });
+      const inspectionMsg: ChatInspectionMessage = {
+        id: nextChatId('msg'),
+        type: 'inspection',
+        createdAt: new Date().toISOString(),
+        source: result.source,
+        inspection: result.inspection,
+        awaitingStart: true,
+      };
+      useChatStore.getState().append(inspectionMsg);
+      if (result.alreadyExisted) {
+        useChatStore.getState().append({
+          id: nextChatId('msg'),
+          type: 'system',
+          variant: 'info',
+          createdAt: new Date().toISOString(),
+          text: `这份 PDF 与项目里已有的 ${result.source.relativePath} 完全一致（sha256 匹配），已复用。`,
+        });
+      }
+    } catch (err) {
+      useChatStore.getState().append({
+        id: nextChatId('msg'),
+        type: 'system',
+        variant: 'error',
+        createdAt: new Date().toISOString(),
+        text: `导入失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  }
+}
+
+/**
+ * Kick off the extract → schema_compile pipeline for an already-imported
+ * source. Mutates the inspection bubble so the "开始分析" button disappears
+ * and creates two job bubbles that update in place as events flow in.
+ */
+export async function startAnalysisForSource(
+  sourceId: string,
+  inspectionMessageId: string,
+): Promise<void> {
+  useChatStore
+    .getState()
+    .update(inspectionMessageId, { awaitingStart: false } as Partial<ChatInspectionMessage>);
+
+  // Bubble that will track the extract job.
+  const extractMsgId = nextChatId('msg');
+  try {
+    const extractJobId = await useJobStore.getState().startStandardExtract(sourceId);
+    useChatStore.getState().append({
+      id: extractMsgId,
+      type: 'job',
+      createdAt: new Date().toISOString(),
+      jobId: extractJobId,
+      kind: 'standard_extract',
+      status: 'running',
+      progress: 0,
+      sourceId,
+    });
+
+    await waitForJob(extractJobId, (patch) => {
+      useChatStore.getState().update(extractMsgId, patch);
+    });
+
+    // Compile.
+    const compileMsgId = nextChatId('msg');
+    const compileJobId = await useJobStore.getState().startSchemaCompile(sourceId);
+    useChatStore.getState().append({
+      id: compileMsgId,
+      type: 'job',
+      createdAt: new Date().toISOString(),
+      jobId: compileJobId,
+      kind: 'schema_compile',
+      status: 'running',
+      progress: 0,
+      sourceId,
+    });
+
+    await waitForJob(compileJobId, (patch) => {
+      useChatStore.getState().update(compileMsgId, patch);
+    });
+
+    // Read the bundle for the final summary message.
+    try {
+      const bundle = await window.nb.artifact.readJson<{
+        clauses: unknown[];
+        requirements: unknown[];
+        references: unknown[];
+        citations: unknown[];
+      }>({ scope: 'standards', ownerId: sourceId, name: 'standard-schema.v0.1.json' });
+      useChatStore.getState().append({
+        id: nextChatId('msg'),
+        type: 'system',
+        variant: 'success',
+        createdAt: new Date().toISOString(),
+        text:
+          `✅ 已编译标准索引：${bundle.clauses.length} 条款、${bundle.requirements.length} 个 requirement、` +
+          `${bundle.references.length} 个引用标准、${bundle.citations.length} 条 citation。` +
+          `\n现在可以在下方输入产品描述启动查询。`,
+      });
+    } catch {
+      useChatStore.getState().append({
+        id: nextChatId('msg'),
+        type: 'system',
+        variant: 'success',
+        createdAt: new Date().toISOString(),
+        text: '✅ 已编译标准索引。现在可以在下方输入产品描述启动查询。',
+      });
+    }
+  } catch (err) {
+    useChatStore.getState().append({
+      id: nextChatId('msg'),
+      type: 'system',
+      variant: 'error',
+      createdAt: new Date().toISOString(),
+      text: `分析失败：${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+}
+
+function waitForJob(jobId: string, patch: (p: Partial<ChatJobMessage>) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const off = window.nb.job.onEvent((event: JobEvent) => {
+      if (event.jobId !== jobId) return;
+      if (event.type === 'progress') {
+        patch({ progress: event.progress, ...(event.message ? { message: event.message } : {}) });
+      } else if (event.type === 'finished') {
+        off();
+        if (event.status === 'succeeded') {
+          patch({ status: 'succeeded', progress: 1 });
+          resolve();
+        } else {
+          patch({ status: 'failed', error: event.error ?? '未知错误' });
+          reject(new Error(event.error ?? `job ${jobId} ${event.status}`));
+        }
+      }
+    });
+  });
+}
+
+/**
+ * Run a product query against the compiled schema. Falls through to a system
+ * message when no standard has been compiled yet so the chat stays self-explanatory.
+ */
+export async function searchProduct(query: string): Promise<void> {
+  const trimmed = query.trim();
+  if (!trimmed) return;
+
+  useChatStore.getState().append({
+    id: nextChatId('msg'),
+    type: 'user-text',
+    createdAt: new Date().toISOString(),
+    text: trimmed,
+  });
+
+  try {
+    const result = await window.nb.search.query({ text: trimmed });
+    const msg: ChatSearchResultMessage = {
+      id: nextChatId('msg'),
+      type: 'search-result',
+      createdAt: new Date().toISOString(),
+      query: trimmed,
+      cards: result.cards,
+      ...(result.summary ? { summary: result.summary } : {}),
+      ...(result.expanded ? { expanded: result.expanded } : {}),
+    };
+    useChatStore.getState().append(msg);
+  } catch (err) {
+    useChatStore.getState().append({
+      id: nextChatId('msg'),
+      type: 'system',
+      variant: 'error',
+      createdAt: new Date().toISOString(),
+      text: `查询失败：${err instanceof Error ? err.message : String(err)}`,
+    });
+  }
+}

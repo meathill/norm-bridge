@@ -125,6 +125,14 @@ export class SourceRegistry {
     return row ? rowToSource(row) : null;
   }
 
+  list(kind?: SourceKind): SourceFile[] {
+    const stmt = kind
+      ? this.sqlite.prepare('SELECT * FROM sources WHERE kind = ? ORDER BY imported_at DESC')
+      : this.sqlite.prepare('SELECT * FROM sources ORDER BY imported_at DESC');
+    const rows = (kind ? stmt.all(kind) : stmt.all()) as Array<Parameters<typeof rowToSource>[0]>;
+    return rows.map(rowToSource);
+  }
+
   resolveAbsolutePath(project: { directory: string }, source: SourceFile): string {
     return resolve(project.directory, source.relativePath);
   }

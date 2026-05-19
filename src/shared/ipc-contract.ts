@@ -7,6 +7,8 @@ import type {
   StartStandardExtractInput,
 } from './domain/job';
 import type { ProjectInfo, ProjectStatus } from './domain/project';
+import type { SearchQueryInput, SearchQueryResult } from './domain/search';
+import type { SourceFile } from './domain/source';
 
 /**
  * Single source of truth for renderer ↔ main IPC channels.
@@ -51,6 +53,30 @@ export type IpcContract = {
     req: { scope: 'standards' | 'inputs' | 'evidence' | 'jobs'; ownerId: string; name: string };
     res: unknown;
   };
+  /** Lists registered sources (optionally filtered by kind). */
+  'source:list': {
+    req: {
+      kind?:
+        | 'standard_pdf'
+        | 'excel_input'
+        | 'certificate'
+        | 'test_report'
+        | 'product_spec'
+        | 'datasheet'
+        | 'report_template';
+    };
+    res: SourceFile[];
+  };
+  /** Opens an imported source in the OS default viewer. */
+  'system:open-source': {
+    req: { sourceId: string };
+    res: { opened: boolean };
+  };
+  /** Natural-language product query against the compiled schema. */
+  'search:query': {
+    req: SearchQueryInput;
+    res: SearchQueryResult;
+  };
 };
 
 export type IpcChannel = keyof IpcContract;
@@ -87,6 +113,15 @@ export type NbApi = {
   };
   artifact: {
     readJson<T = unknown>(req: IpcReq<'artifact:read-json'>): Promise<T>;
+  };
+  source: {
+    list(req: IpcReq<'source:list'>): Promise<IpcRes<'source:list'>>;
+  };
+  system: {
+    openSource(req: IpcReq<'system:open-source'>): Promise<IpcRes<'system:open-source'>>;
+  };
+  search: {
+    query(req: IpcReq<'search:query'>): Promise<IpcRes<'search:query'>>;
   };
   /**
    * Renderer-side helper. Calls Electron's webUtils.getPathForFile on a File object

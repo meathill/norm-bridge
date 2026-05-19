@@ -1,6 +1,7 @@
 import { app, BrowserWindow } from 'electron';
 import { resolve } from 'node:path';
 import { resolveAgentRunner } from '@agents/index';
+import { resolveSearchRunner } from '@agents/search-runner';
 import { ProjectFs } from '@main/services/project-fs';
 import { SqliteService } from '@main/services/sqlite-service';
 import { ProjectSession } from '@main/services/project-session';
@@ -10,6 +11,7 @@ import { ArtifactStore } from '@main/services/artifact-store';
 import { JobBus } from '@main/services/job-bus';
 import { JobService } from '@main/services/job-service';
 import { SchemaCompileService } from '@main/services/schema-compile-service';
+import { SearchService } from '@main/services/search-service';
 import { ParserRegistry } from '@main/parsers/parser-registry';
 import { registerAllIpcHandlers } from '@main/ipc/register-all';
 
@@ -47,6 +49,8 @@ const schemaCompileService = new SchemaCompileService(
   sqliteService,
   agentRunner,
 );
+const searchRunner = resolveSearchRunner();
+const searchService = new SearchService(projectSession, sqliteService, searchRunner);
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -80,8 +84,10 @@ app.whenReady().then(() => {
     importService,
     jobService,
     schemaCompileService,
+    searchService,
     jobBus,
     artifacts: artifactStore,
+    sourceRegistry,
   });
   createMainWindow();
 
