@@ -6,6 +6,21 @@ import type {
 import type { JobEvent } from '@shared/domain/job';
 import { nextChatId, useChatStore } from '@/stores/chat.store';
 import { useJobStore } from '@/stores/job.store';
+import { useRuntimeStore } from '@/stores/runtime.store';
+
+/** Re-check runtime config before any LLM-bound action. Returns true if it's safe to proceed. */
+async function ensureRuntimeReady(label: string): Promise<boolean> {
+  const status = await useRuntimeStore.getState().refresh();
+  if (status && status.ready) return true;
+  useChatStore.getState().append({
+    id: nextChatId('msg'),
+    type: 'system',
+    variant: 'error',
+    createdAt: new Date().toISOString(),
+    text: `无法${label}：LLM 配置未就绪 — ${status?.errorMessage ?? '请检查 .env 中的 OPENAI_API_KEY'}`,
+  });
+  return false;
+}
 
 /**
  * Drop one or more PDF paths into the chat. Each file is imported (which
@@ -63,6 +78,7 @@ export async function startAnalysisForSource(
   sourceId: string,
   inspectionMessageId: string,
 ): Promise<void> {
+  if (!(await ensureRuntimeReady('启动分析'))) return;
   useChatStore
     .getState()
     .update(inspectionMessageId, { awaitingStart: false } as Partial<ChatInspectionMessage>);
@@ -176,6 +192,8 @@ export async function searchProduct(query: string): Promise<void> {
     createdAt: new Date().toISOString(),
     text: trimmed,
   });
+
+  if (!(await ensureRuntimeReady('执行查询'))) return;
 
   try {
     const result = await window.nb.search.query({ text: trimmed });

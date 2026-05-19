@@ -77,6 +77,18 @@ export type IpcContract = {
     req: SearchQueryInput;
     res: SearchQueryResult;
   };
+  /** Reports whether the LLM runtime is configured (key, endpoint, model). */
+  'config:status': {
+    req: void;
+    res: {
+      ready: boolean;
+      apiKeyMasked: string | null;
+      baseURL: string | null;
+      compileModel: string;
+      searchModel: string;
+      errorMessage?: string;
+    };
+  };
 };
 
 export type IpcChannel = keyof IpcContract;
@@ -122,6 +134,9 @@ export type NbApi = {
   };
   search: {
     query(req: IpcReq<'search:query'>): Promise<IpcRes<'search:query'>>;
+  };
+  config: {
+    status(): Promise<IpcRes<'config:status'>>;
   };
   /**
    * Renderer-side helper. Calls Electron's webUtils.getPathForFile on a File object

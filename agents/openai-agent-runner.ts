@@ -1,4 +1,4 @@
-import { Agent, run, setTracingDisabled } from '@openai/agents';
+import { Agent, run } from '@openai/agents';
 import {
   clauseCompilerOutputSchema,
   referenceResolverOutputSchema,
@@ -14,8 +14,7 @@ import type {
   AgentCompileResult,
   AgentRunner,
 } from './agent-runner';
-
-const DEFAULT_MODEL = process.env['NORMBRIDGE_AGENT_MODEL'] ?? 'gpt-4.1-mini';
+import { configureOpenAiRuntime } from './runtime-config';
 
 const CLAUSE_INSTRUCTIONS = `You compile a technical-standard PDF into a clause tree.
 The user message contains text blocks tagged by page and block id. Detect headings of the form
@@ -43,40 +42,44 @@ Cite the block ids you read each from. NEVER invent quotes.`;
 const DEFAULT_MAX_PROMPT_BLOCKS = 8000;
 
 export type OpenAiRunnerOptions = {
+  /** Override model for this runner only; otherwise reads NORMBRIDGE_COMPILE_MODEL / NORMBRIDGE_AGENT_MODEL. */
   model?: string;
   maxBlocksPerPrompt?: number;
 };
 
 export class OpenAiAgentRunner implements AgentRunner {
   readonly id = 'openai-agents';
-  private readonly model: string;
+  private readonly explicitModel?: string;
   private readonly maxBlocks: number;
 
   constructor(opts?: OpenAiRunnerOptions) {
-    this.model = opts?.model ?? DEFAULT_MODEL;
+    if (opts?.model) this.explicitModel = opts.model;
     this.maxBlocks = opts?.maxBlocksPerPrompt ?? DEFAULT_MAX_PROMPT_BLOCKS;
-    // TECH_SPEC §18 — never ship prompts to the OpenAI dashboard by default.
-    setTracingDisabled(true);
   }
 
   async compile(
     ctx: AgentCompileContext,
     callbacks?: AgentCompileCallbacks,
   ): Promise<AgentCompileResult> {
-    requireApiKey();
-    const text = blocksToPromptText(ctx.textBlocks, this.maxBlocks);
+    // Eager check: surface the missing-config error before we spend any time on the input.
+    const cfg = configureOpenAiRuntime();
+    const model = this.explicitModel ?? cfg.compileModel;
 
-    await callbacks?.onLog?.('info', `openai-agent-runner: model=${this.model}`);
+    const text = blocksToPromptText(ctx.textBlocks, this.maxBlocks);
+    await callbacks?.onLog?.(
+      'info',
+      `openai-agent-runner: model=${model}, baseURL=${cfg.baseURL ?? '(default)'}`,
+    );
 
     const clauseAgent = new Agent({
       name: 'ClauseCompiler',
       instructions: CLAUSE_INSTRUCTIONS,
-      model: this.model,
+      model,
       outputType: clauseCompilerOutputSchema,
     });
     await callbacks?.onProgress?.('clauses', 0);
     const clauseRun = await run(clauseAgent, [
-      { role: 'user', content: standardHeader(ctx) + '\n\n' + text },
+      { role: 'user', content: `${standardHeader(ctx)}\n\n${text}` },
     ]);
     const clauses = ensureOutput<ClauseCompilerOutput>(clauseRun.finalOutput, 'clauses');
     await callbacks?.onProgress?.('clauses', 1);
@@ -85,19 +88,14 @@ export class OpenAiAgentRunner implements AgentRunner {
     const requirementAgent = new Agent({
       name: 'RequirementExtractor',
       instructions: REQUIREMENT_INSTRUCTIONS,
-      model: this.model,
+      model,
       outputType: requirementExtractorOutputSchema,
     });
     await callbacks?.onProgress?.('requirements', 0);
     const requirementRun = await run(requirementAgent, [
       {
         role: 'user',
-        content:
-          standardHeader(ctx) +
-          '\n\nClause tree:\n' +
-          JSON.stringify(clauses.clauses, null, 2) +
-          '\n\nText blocks:\n' +
-          text,
+        content: `${standardHeader(ctx)}\n\nClause tree:\n${JSON.stringify(clauses.clauses, null, 2)}\n\nText blocks:\n${text}`,
       },
     ]);
     const requirements = ensureOutput<RequirementExtractorOutput>(
@@ -110,12 +108,12 @@ export class OpenAiAgentRunner implements AgentRunner {
     const referenceAgent = new Agent({
       name: 'ReferenceResolver',
       instructions: REFERENCE_INSTRUCTIONS,
-      model: this.model,
+      model,
       outputType: referenceResolverOutputSchema,
     });
     await callbacks?.onProgress?.('references', 0);
     const referenceRun = await run(referenceAgent, [
-      { role: 'user', content: standardHeader(ctx) + '\n\n' + text },
+      { role: 'user', content: `${standardHeader(ctx)}\n\n${text}` },
     ]);
     const references = ensureOutput<ReferenceResolverOutput>(
       referenceRun.finalOutput,
@@ -125,14 +123,6 @@ export class OpenAiAgentRunner implements AgentRunner {
     await callbacks?.onLog?.('info', `openai: ${references.references.length} references`);
 
     return { clauses, requirements, references };
-  }
-}
-
-function requireApiKey(): void {
-  if (!process.env['OPENAI_API_KEY']) {
-    throw new Error(
-      'OPENAI_API_KEY is not set. Configure the key in the app settings or switch to the mock agent runner.',
-    );
   }
 }
 
@@ -148,7 +138,6 @@ function standardHeader(ctx: AgentCompileContext): string {
 }
 
 function blocksToPromptText(blocks: PdfTextBlock[], cap: number): string {
-  // Group by page, then output "<page N>\n  [block_id] text" lines, capped.
   const grouped = new Map<number, PdfTextBlock[]>();
   for (const b of blocks.slice(0, cap)) {
     const list = grouped.get(b.page) ?? [];

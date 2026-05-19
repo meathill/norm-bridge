@@ -16,6 +16,7 @@ import { registerJobHandlers } from './job.handlers';
 import { registerArtifactHandlers } from './artifact.handlers';
 import { registerSourceHandlers } from './source.handlers';
 import { registerSearchHandlers } from './search.handlers';
+import { registerConfigHandlers } from './config.handlers';
 
 export type IpcHandler<K extends IpcChannel> = (
   req: IpcContract[K]['req'],
@@ -47,6 +48,7 @@ export function registerAllIpcHandlers(deps: IpcDeps): void {
   registerArtifactHandlers(handlerRegistrar, deps);
   registerSourceHandlers(handlerRegistrar, deps);
   registerSearchHandlers(handlerRegistrar, deps);
+  registerConfigHandlers(handlerRegistrar);
 
   // Bridge JobBus events to every renderer window. Multiple windows is unusual in
   // v0.1 but cheap to support correctly.

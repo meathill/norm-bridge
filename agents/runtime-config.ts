@@ -1,0 +1,105 @@
+import { OpenAI } from 'openai';
+import { setDefaultOpenAIClient, setDefaultOpenAIKey, setTracingDisabled } from '@openai/agents';
+
+/**
+ * Single source of truth for "how do we reach an LLM right now":
+ *   - reads OPENAI_API_KEY (required)
+ *   - reads OPENAI_BASE_URL (optional override for proxies / Azure / DeepSeek / Qwen / etc.)
+ *   - reads NORMBRIDGE_AGENT_MODEL / *_COMPILE_MODEL / *_SEARCH_MODEL for per-task overrides
+ *
+ * Configuration happens once at app boot. Subsequent agent calls go through the
+ * default OpenAI client we set on the agents SDK.
+ */
+
+export type RuntimeAgentConfig = {
+  apiKey: string;
+  baseURL: string | null;
+  compileModel: string;
+  searchModel: string;
+};
+
+const DEFAULT_MODEL = 'gpt-4.1-mini';
+
+export class MissingOpenAiConfigError extends Error {
+  constructor(public readonly missingKeys: string[]) {
+    super(
+      `LLM 配置缺失：未读取到 ${missingKeys.join(', ')}。请在项目根目录的 .env 中配置后重启应用。`,
+    );
+    this.name = 'MissingOpenAiConfigError';
+  }
+}
+
+let cached: RuntimeAgentConfig | null = null;
+
+export function configureOpenAiRuntime(): RuntimeAgentConfig {
+  if (cached) return cached;
+
+  const apiKey = (process.env['OPENAI_API_KEY'] ?? '').trim();
+  if (!apiKey) {
+    throw new MissingOpenAiConfigError(['OPENAI_API_KEY']);
+  }
+
+  const baseURL = (process.env['OPENAI_BASE_URL'] ?? '').trim() || null;
+  const defaultModel = (process.env['NORMBRIDGE_AGENT_MODEL'] ?? '').trim() || DEFAULT_MODEL;
+  const compileModel = (process.env['NORMBRIDGE_COMPILE_MODEL'] ?? '').trim() || defaultModel;
+  const searchModel = (process.env['NORMBRIDGE_SEARCH_MODEL'] ?? '').trim() || defaultModel;
+
+  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = { apiKey };
+  if (baseURL) clientOptions.baseURL = baseURL;
+  const client = new OpenAI(clientOptions);
+
+  setDefaultOpenAIClient(client);
+  setDefaultOpenAIKey(apiKey);
+  // TECH_SPEC §18 — never ship prompts to the OpenAI dashboard by default.
+  setTracingDisabled(true);
+
+  const config: RuntimeAgentConfig = { apiKey, baseURL, compileModel, searchModel };
+  cached = config;
+  return config;
+}
+
+export function getCachedConfig(): RuntimeAgentConfig | null {
+  return cached;
+}
+
+/** Safe-to-display snapshot (no raw key). */
+export type RuntimeAgentStatus = {
+  ready: boolean;
+  apiKeyMasked: string | null;
+  baseURL: string | null;
+  compileModel: string;
+  searchModel: string;
+  errorMessage?: string;
+};
+
+export function getRuntimeStatus(): RuntimeAgentStatus {
+  try {
+    const cfg = configureOpenAiRuntime();
+    return {
+      ready: true,
+      apiKeyMasked: maskKey(cfg.apiKey),
+      baseURL: cfg.baseURL,
+      compileModel: cfg.compileModel,
+      searchModel: cfg.searchModel,
+    };
+  } catch (err) {
+    return {
+      ready: false,
+      apiKeyMasked: null,
+      baseURL: (process.env['OPENAI_BASE_URL'] ?? '').trim() || null,
+      compileModel: (process.env['NORMBRIDGE_COMPILE_MODEL'] ?? '').trim() || DEFAULT_MODEL,
+      searchModel: (process.env['NORMBRIDGE_SEARCH_MODEL'] ?? '').trim() || DEFAULT_MODEL,
+      errorMessage: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function maskKey(key: string): string {
+  if (key.length <= 8) return '****';
+  return `${key.slice(0, 4)}…${key.slice(-4)}`;
+}
+
+/** Test helper. */
+export function __resetRuntimeForTesting(): void {
+  cached = null;
+}

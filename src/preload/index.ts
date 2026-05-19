@@ -49,6 +49,9 @@ const api: NbApi = {
   search: {
     query: (req) => invoke('search:query', req),
   },
+  config: {
+    status: () => invoke('config:status', undefined as never),
+  },
   files: {
     getPathForFile: (file) => webUtils.getPathForFile(file),
   },

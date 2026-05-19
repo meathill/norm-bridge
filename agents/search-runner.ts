@@ -1,6 +1,7 @@
-import { Agent, run, setTracingDisabled } from '@openai/agents';
+import { Agent, run } from '@openai/agents';
 import { z } from 'zod';
 import type { SearchExpansion, SearchResultCard } from '@shared/domain/search';
+import { configureOpenAiRuntime } from './runtime-config';
 
 export type SearchExpandInput = {
   query: string;
@@ -14,8 +15,8 @@ export type SearchSummaryInput = {
 };
 
 /**
- * Two-step interface so the SearchService can pick mock or openai at construction
- * and call each step in isolation. Keeps the surface narrow and mockable.
+ * Two-step interface so the SearchService can plug different backends and
+ * call each step in isolation. Keeps the surface narrow and mockable.
  */
 export interface SearchRunner {
   readonly id: string;
@@ -24,7 +25,7 @@ export interface SearchRunner {
   summarize(input: SearchSummaryInput): Promise<string | null>;
 }
 
-/** Pure-JS fallback that doesn't need an API key. */
+/** Pure-JS fallback. Only used in tests where we inject it directly. */
 export class MockSearchRunner implements SearchRunner {
   readonly id = 'mock';
 
@@ -56,21 +57,26 @@ const SUMMARY_INSTRUCTIONS = `You write a 1-2 sentence Chinese summary of which 
 relevant to the user's query, based on the structured results provided.
 Refer to clauses by §number. Do NOT invent requirements that are not in the results.`;
 
+export type OpenAiSearchOptions = {
+  /** Override; otherwise reads from runtime-config.searchModel. */
+  model?: string;
+};
+
 export class OpenAiSearchRunner implements SearchRunner {
   readonly id = 'openai-agents';
-  private readonly model: string;
+  private readonly explicitModel?: string;
 
-  constructor(opts?: { model?: string }) {
-    this.model = opts?.model ?? process.env['NORMBRIDGE_AGENT_MODEL'] ?? 'gpt-4.1-mini';
-    setTracingDisabled(true);
+  constructor(opts?: OpenAiSearchOptions) {
+    if (opts?.model) this.explicitModel = opts.model;
   }
 
   async expand({ query, knownStandardCodes }: SearchExpandInput): Promise<SearchExpansion> {
-    requireApiKey();
+    const cfg = configureOpenAiRuntime();
+    const model = this.explicitModel ?? cfg.searchModel;
     const agent = new Agent({
       name: 'SearchExpander',
       instructions: EXPANSION_INSTRUCTIONS,
-      model: this.model,
+      model,
       outputType: expansionSchema,
     });
     const context =
@@ -83,12 +89,13 @@ export class OpenAiSearchRunner implements SearchRunner {
   }
 
   async summarize({ query, cards }: SearchSummaryInput): Promise<string | null> {
-    if (!process.env['OPENAI_API_KEY']) return null;
     if (cards.length === 0) return null;
+    const cfg = configureOpenAiRuntime();
+    const model = this.explicitModel ?? cfg.searchModel;
     const agent = new Agent({
       name: 'SearchSummarizer',
       instructions: SUMMARY_INSTRUCTIONS,
-      model: this.model,
+      model,
     });
     const condensed = cards.slice(0, 6).map((c) => ({
       clause: c.clauseNo ?? '',
@@ -108,15 +115,13 @@ export class OpenAiSearchRunner implements SearchRunner {
   }
 }
 
+/**
+ * Production resolver. Always returns the OpenAI-backed runner; missing config
+ * is surfaced at compile/query time as MissingOpenAiConfigError. Tests inject
+ * MockSearchRunner directly.
+ */
 export function resolveSearchRunner(): SearchRunner {
-  if (process.env['OPENAI_API_KEY']) return new OpenAiSearchRunner();
-  return new MockSearchRunner();
-}
-
-function requireApiKey(): void {
-  if (!process.env['OPENAI_API_KEY']) {
-    throw new Error('OPENAI_API_KEY is not set; install a key or use MockSearchRunner.');
-  }
+  return new OpenAiSearchRunner();
 }
 
 const STOPWORDS = new Set([

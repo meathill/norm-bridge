@@ -1,3 +1,6 @@
+// Load .env *before* anything else reads process.env. Looks in process.cwd()
+// (repo root in dev). For production builds we'll also support userData/.env.
+import 'dotenv/config';
 import { app, BrowserWindow } from 'electron';
 import { resolve } from 'node:path';
 import { resolveAgentRunner } from '@agents/index';
