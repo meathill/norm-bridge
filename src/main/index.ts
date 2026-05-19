@@ -3,6 +3,9 @@ import { resolve } from 'node:path';
 import { ProjectFs } from '@main/services/project-fs';
 import { SqliteService } from '@main/services/sqlite-service';
 import { ProjectSession } from '@main/services/project-session';
+import { SourceRegistry } from '@main/services/source-registry';
+import { ImportService } from '@main/services/import-service';
+import { ParserRegistry } from '@main/parsers/parser-registry';
 import { registerAllIpcHandlers } from '@main/ipc/register-all';
 
 const moduleDir = import.meta.dirname;
@@ -12,6 +15,14 @@ const VITE_DEV_SERVER_URL = process.env['ELECTRON_RENDERER_URL'];
 const projectFs = new ProjectFs();
 const sqliteService = new SqliteService();
 const projectSession = new ProjectSession(projectFs, sqliteService);
+const sourceRegistry = new SourceRegistry(projectFs, sqliteService);
+const parserRegistry = new ParserRegistry();
+const importService = new ImportService(
+  projectSession,
+  sourceRegistry,
+  parserRegistry,
+  sqliteService,
+);
 
 function createMainWindow(): BrowserWindow {
   const win = new BrowserWindow({
@@ -40,7 +51,7 @@ function createMainWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
-  registerAllIpcHandlers({ session: projectSession });
+  registerAllIpcHandlers({ session: projectSession, importService });
   createMainWindow();
 
   app.on('activate', () => {

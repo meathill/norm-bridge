@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
+import { useNavStore } from '@/stores/nav.store';
 import { useProjectStore } from '@/stores/project.store';
 
 export function ProjectHome() {
   const { status, loading, error, current, refresh, createProject, openProject, closeProject } =
     useProjectStore();
+  const setView = useNavStore((s) => s.setView);
 
   const [mode, setMode] = useState<'idle' | 'create' | 'open'>('idle');
   const [directory, setDirectory] = useState('');
@@ -109,13 +111,19 @@ export function ProjectHome() {
               </div>
             ))}
           </dl>
+
+          <div className="mt-6 flex flex-wrap gap-2">
+            <Button onClick={() => setView('standard-import')}>导入标准 PDF</Button>
+            <Button variant="ghost" disabled>
+              导入产品清单（即将开放）
+            </Button>
+            <Button variant="ghost" disabled>
+              查看审阅队列（即将开放）
+            </Button>
+          </div>
         </section>
 
-        {error ? (
-          <p className="text-xs text-destructive">{error}</p>
-        ) : (
-          <p className="text-xs text-muted-foreground">下一步：导入目标国家标准 PDF（即将开放）</p>
-        )}
+        {error && <p className="text-xs text-destructive">{error}</p>}
       </div>
     );
   }

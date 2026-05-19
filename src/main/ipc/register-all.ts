@@ -1,9 +1,11 @@
 import { ipcMain } from 'electron';
 import type { IpcChannel, IpcContract } from '@shared/ipc-contract';
+import type { ImportService } from '@main/services/import-service';
 import type { ProjectSession } from '@main/services/project-session';
 import { registerProjectHandlers } from './project.handlers';
 import { registerDialogHandlers } from './dialog.handlers';
 import { registerAppHandlers } from './app.handlers';
+import { registerImportHandlers } from './import.handlers';
 
 export type IpcHandler<K extends IpcChannel> = (
   req: IpcContract[K]['req'],
@@ -17,10 +19,12 @@ const handlerRegistrar: HandlerRegistrar = (channel, handler) => {
 
 export type IpcDeps = {
   session: ProjectSession;
+  importService: ImportService;
 };
 
 export function registerAllIpcHandlers(deps: IpcDeps): void {
   registerAppHandlers(handlerRegistrar);
   registerDialogHandlers(handlerRegistrar);
   registerProjectHandlers(handlerRegistrar, deps);
+  registerImportHandlers(handlerRegistrar, deps);
 }
