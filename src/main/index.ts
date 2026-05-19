@@ -5,6 +5,9 @@ import { SqliteService } from '@main/services/sqlite-service';
 import { ProjectSession } from '@main/services/project-session';
 import { SourceRegistry } from '@main/services/source-registry';
 import { ImportService } from '@main/services/import-service';
+import { ArtifactStore } from '@main/services/artifact-store';
+import { JobBus } from '@main/services/job-bus';
+import { JobService } from '@main/services/job-service';
 import { ParserRegistry } from '@main/parsers/parser-registry';
 import { registerAllIpcHandlers } from '@main/ipc/register-all';
 
@@ -17,10 +20,20 @@ const sqliteService = new SqliteService();
 const projectSession = new ProjectSession(projectFs, sqliteService);
 const sourceRegistry = new SourceRegistry(projectFs, sqliteService);
 const parserRegistry = new ParserRegistry();
+const artifactStore = new ArtifactStore();
+const jobBus = new JobBus(projectSession, artifactStore);
 const importService = new ImportService(
   projectSession,
   sourceRegistry,
   parserRegistry,
+  sqliteService,
+);
+const jobService = new JobService(
+  projectSession,
+  sourceRegistry,
+  parserRegistry,
+  artifactStore,
+  jobBus,
   sqliteService,
 );
 
@@ -51,7 +64,13 @@ function createMainWindow(): BrowserWindow {
 }
 
 app.whenReady().then(() => {
-  registerAllIpcHandlers({ session: projectSession, importService });
+  registerAllIpcHandlers({
+    session: projectSession,
+    importService,
+    jobService,
+    jobBus,
+    artifacts: artifactStore,
+  });
   createMainWindow();
 
   app.on('activate', () => {

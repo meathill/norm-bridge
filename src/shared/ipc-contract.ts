@@ -1,4 +1,11 @@
 import type { ImportResult } from './domain/import-result';
+import type {
+  JobEvent,
+  JobInfo,
+  JobKind,
+  StartJobResult,
+  StartStandardExtractInput,
+} from './domain/job';
 import type { ProjectInfo, ProjectStatus } from './domain/project';
 
 /**
@@ -29,6 +36,17 @@ export type IpcContract = {
     req: { filePath: string };
     res: ImportResult;
   };
+  'job:start-standard-extract': {
+    req: StartStandardExtractInput;
+    res: StartJobResult;
+  };
+  'job:get': { req: { jobId: string }; res: JobInfo | null };
+  'job:list': { req: { kind?: JobKind; sourceId?: string }; res: JobInfo[] };
+  /** Reads a JSON artifact at artifacts/&lt;scope&gt;/&lt;ownerId&gt;/&lt;name&gt; for the renderer to display. */
+  'artifact:read-json': {
+    req: { scope: 'standards' | 'inputs' | 'evidence' | 'jobs'; ownerId: string; name: string };
+    res: unknown;
+  };
 };
 
 export type IpcChannel = keyof IpcContract;
@@ -51,6 +69,17 @@ export type NbApi = {
   };
   import: {
     standardPdf(req: IpcReq<'import:standard-pdf'>): Promise<IpcRes<'import:standard-pdf'>>;
+  };
+  job: {
+    startStandardExtract(
+      req: IpcReq<'job:start-standard-extract'>,
+    ): Promise<IpcRes<'job:start-standard-extract'>>;
+    get(req: IpcReq<'job:get'>): Promise<IpcRes<'job:get'>>;
+    list(req: IpcReq<'job:list'>): Promise<IpcRes<'job:list'>>;
+    onEvent(handler: (event: JobEvent) => void): () => void;
+  };
+  artifact: {
+    readJson<T = unknown>(req: IpcReq<'artifact:read-json'>): Promise<T>;
   };
   /**
    * Renderer-side helper. Calls Electron's webUtils.getPathForFile on a File object

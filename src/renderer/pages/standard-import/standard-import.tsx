@@ -4,13 +4,18 @@ import type { ImportResult } from '@shared/domain/import-result';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { useImportStore } from '@/stores/import.store';
+import { useJobStore } from '@/stores/job.store';
 import { useNavStore } from '@/stores/nav.store';
 import { useProjectStore } from '@/stores/project.store';
+import { useSelectionStore } from '@/stores/selection.store';
 
 export function StandardImport() {
   const { current } = useProjectStore();
   const { recent, importing, error, importStandardPdf, clearError } = useImportStore();
   const setView = useNavStore((s) => s.setView);
+  const startExtract = useJobStore((s) => s.startStandardExtract);
+  const setSelectedSource = useSelectionStore((s) => s.setSelectedSource);
+  const setSelectedJob = useSelectionStore((s) => s.setSelectedJob);
 
   const [dragOver, setDragOver] = useState(false);
 
@@ -113,7 +118,24 @@ export function StandardImport() {
         )}
         <ul className="flex flex-col gap-3">
           {recent.map((item) => (
-            <ImportCard key={item.source.id} item={item} />
+            <ImportCard
+              key={item.source.id}
+              item={item}
+              onCompileIndex={async () => {
+                clearError();
+                try {
+                  const jobId = await startExtract(item.source.id);
+                  setSelectedSource(item.source.id);
+                  setSelectedJob(jobId);
+                  setView('standard-review');
+                } catch (err) {
+                  // Surface via the page's error banner.
+                  useImportStore.setState({
+                    error: err instanceof Error ? err.message : String(err),
+                  });
+                }
+              }}
+            />
           ))}
         </ul>
       </section>
@@ -121,8 +143,15 @@ export function StandardImport() {
   );
 }
 
-function ImportCard({ item }: { item: ImportResult }) {
+function ImportCard({
+  item,
+  onCompileIndex,
+}: {
+  item: ImportResult;
+  onCompileIndex: () => Promise<void> | void;
+}) {
   const { source, inspection, alreadyExisted } = item;
+  const blocked = inspection.isEncrypted || inspection.needsOcr === true;
   return (
     <li className="rounded-lg border bg-card p-4 shadow-sm">
       <div className="flex items-start justify-between gap-4">
@@ -135,12 +164,15 @@ function ImportCard({ item }: { item: ImportResult }) {
             sha256 {source.sha256.slice(0, 12)}… · {formatBytes(source.sizeBytes)}
           </p>
         </div>
-        <div className="flex flex-col items-end gap-1">
+        <div className="flex flex-col items-end gap-2">
           {alreadyExisted && (
             <span className="rounded bg-muted px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
               已存在 · 复用
             </span>
           )}
+          <Button size="sm" disabled={blocked} onClick={() => void onCompileIndex()}>
+            {blocked ? '需要先处理上面的限制' : '编译索引 →'}
+          </Button>
         </div>
       </div>
 

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 
-export type AppView = 'home' | 'standard-import';
+export type AppView = 'home' | 'standard-import' | 'standard-review';
 
 type NavStoreState = {
   view: AppView;

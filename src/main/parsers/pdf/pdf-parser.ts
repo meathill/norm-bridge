@@ -1,10 +1,18 @@
 import { readFile } from 'node:fs/promises';
+import { newId } from '@shared/ids';
 import type { PdfInspection } from '@shared/domain/inspection';
+import type {
+  PdfExtractData,
+  PdfExtractProgress,
+  PdfPageInfo,
+  PdfTextBlock,
+} from '@shared/domain/pdf-extract';
 import type {
   DocumentParser,
   ParserInspectInput,
   ParserSupportInput,
 } from '@main/parsers/document-parser';
+import { pageDimensions, textItemToTopLeftBbox } from './pdf-coords';
 
 const PDF_EXT = new Set(['.pdf']);
 const PDF_MIME = new Set(['application/pdf', 'application/x-pdf']);
@@ -26,19 +34,20 @@ async function loadPdfjs() {
   return mod;
 }
 
-/**
- * Detect whether a thrown error came from a password-protected PDF.
- * pdfjs throws PasswordException with a `code` matching PasswordResponses.NEED_PASSWORD.
- */
 function isPasswordError(err: unknown): boolean {
   if (!err || typeof err !== 'object') return false;
   const e = err as { name?: string; code?: number; message?: string };
   if (e.name === 'PasswordException') return true;
-  // pdfjs has code 1 = NEED_PASSWORD, 2 = INCORRECT_PASSWORD.
   if (e.code === 1 || e.code === 2) return true;
   if (e.message && /password/i.test(e.message)) return true;
   return false;
 }
+
+export type PdfExtractInput = {
+  filePath: string;
+  sourceId: string;
+  onProgress?: (p: PdfExtractProgress) => void;
+};
 
 export class PdfParser implements DocumentParser {
   readonly name = 'pdf';
@@ -113,5 +122,76 @@ export class PdfParser implements DocumentParser {
       needsOcr,
       warnings,
     };
+  }
+
+  async extract({ filePath, sourceId, onProgress }: PdfExtractInput): Promise<PdfExtractData> {
+    const fileBuffer = await readFile(filePath);
+    const pdfjs = await loadPdfjs();
+    const data = new Uint8Array(fileBuffer.buffer, fileBuffer.byteOffset, fileBuffer.byteLength);
+
+    const task = pdfjs.getDocument({
+      data,
+      useSystemFonts: true,
+      disableFontFace: true,
+    });
+    const doc = await task.promise;
+    const pageCount = doc.numPages;
+
+    const pages: PdfPageInfo[] = [];
+    const textBlocks: PdfTextBlock[] = [];
+
+    for (let pageNo = 1; pageNo <= pageCount; pageNo++) {
+      const page = await doc.getPage(pageNo);
+      const view = page.view;
+      const rotation = page.rotate ?? 0;
+      const pageView = { view, rotation };
+      const { width, height } = pageDimensions(pageView);
+
+      const text = await page.getTextContent();
+      let order = 0;
+      let blockCount = 0;
+      for (const item of text.items) {
+        // Marked-content boundaries appear as items without transform; ignore them.
+        const t = item as {
+          transform?: number[];
+          width?: number;
+          height?: number;
+          str?: string;
+          fontName?: string;
+        };
+        if (!t.transform || typeof t.str !== 'string' || t.str.length === 0) continue;
+        const bbox = textItemToTopLeftBbox(
+          { transform: t.transform, width: t.width ?? 0, height: t.height ?? 0 },
+          pageView,
+        );
+        textBlocks.push({
+          id: newId('citation'),
+          page: pageNo,
+          text: t.str,
+          bbox,
+          readingOrder: order++,
+          ...(t.fontName ? { fontHint: t.fontName } : {}),
+        });
+        blockCount++;
+      }
+
+      pages.push({
+        page: pageNo,
+        width,
+        height,
+        rotation,
+        textBlockCount: blockCount,
+      });
+
+      page.cleanup();
+      if (onProgress) {
+        onProgress({ page: pageNo, totalPages: pageCount });
+      }
+    }
+
+    await doc.cleanup();
+    await doc.destroy();
+
+    return { sourceId, pages, textBlocks };
   }
 }
