@@ -24,8 +24,60 @@ const PDF_MIME = new Set(['application/pdf', 'application/x-pdf']);
  * In Node / Electron main we use pdfjs's "fake worker" mode: pdfjs still needs
  * `workerSrc` set so it can load the worker JS into the same thread. Resolving via
  * createRequire keeps the path correct under both pnpm symlinks and bundled output.
+ *
+ * We also polyfill DOMMatrix / Path2D on globalThis before the worker module loads
+ * — both are referenced when pdfjs parses annotations, images, or transforms, and
+ * Node has neither. The polyfills are pure JS, no native dependencies.
  */
+let polyfillsInstalled = false;
+
+async function installDomPolyfills(): Promise<void> {
+  if (polyfillsInstalled) return;
+  const g = globalThis as unknown as {
+    DOMMatrix?: unknown;
+    DOMMatrixReadOnly?: unknown;
+    Path2D?: unknown;
+    ImageData?: unknown;
+  };
+  if (typeof g.DOMMatrix === 'undefined') {
+    const mod = await import('@thednp/dommatrix');
+    const DOMMatrixCtor = (mod as { default: unknown }).default;
+    g.DOMMatrix = DOMMatrixCtor;
+    g.DOMMatrixReadOnly = DOMMatrixCtor;
+  }
+  if (typeof g.Path2D === 'undefined') {
+    const { Path2D } = await import('path2d');
+    g.Path2D = Path2D;
+  }
+  if (typeof g.ImageData === 'undefined') {
+    // Minimal stub: pdfjs only `new ImageData(width, height)` and reads `data`.
+    g.ImageData = class ImageData {
+      readonly data: Uint8ClampedArray;
+      readonly width: number;
+      readonly height: number;
+      constructor(...args: unknown[]) {
+        const [first, second, third] = args as [
+          number | Uint8ClampedArray,
+          number,
+          number | undefined,
+        ];
+        if (first instanceof Uint8ClampedArray) {
+          this.data = first;
+          this.width = second;
+          this.height = third ?? this.data.length / 4 / second;
+        } else {
+          this.width = first;
+          this.height = second;
+          this.data = new Uint8ClampedArray(first * second * 4);
+        }
+      }
+    };
+  }
+  polyfillsInstalled = true;
+}
+
 async function loadPdfjs() {
+  await installDomPolyfills();
   const { createRequire } = await import('node:module');
   const requireFromHere = createRequire(import.meta.url);
   const workerPath = requireFromHere.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs');

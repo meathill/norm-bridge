@@ -21,9 +21,11 @@
   },
   "dependencies": {
     "@openai/agents": "^0.11.4",
+    "@thednp/dommatrix": "^3.0.4",
     "clsx": "^2.1.1",
     "dotenv": "^17.4.2",
     "openai": "^6.38.0",
+    "path2d": "^0.3.1",
     "pdfjs-dist": "^5.7.284",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
