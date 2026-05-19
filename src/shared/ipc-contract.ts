@@ -77,7 +77,7 @@ export type IpcContract = {
     req: SearchQueryInput;
     res: SearchQueryResult;
   };
-  /** Reports whether the LLM runtime is configured (key, endpoint, model). */
+  /** Reports whether the LLM runtime is configured (key, endpoint, model, api style). */
   'config:status': {
     req: void;
     res: {
@@ -86,6 +86,7 @@ export type IpcContract = {
       baseURL: string | null;
       compileModel: string;
       searchModel: string;
+      apiStyle: 'chat_completions' | 'responses';
       errorMessage?: string;
     };
   };

@@ -164,6 +164,17 @@ function waitForJob(jobId: string, patch: (p: Partial<ChatJobMessage>) => void):
       if (event.jobId !== jobId) return;
       if (event.type === 'progress') {
         patch({ progress: event.progress, ...(event.message ? { message: event.message } : {}) });
+      } else if (event.type === 'log') {
+        // Surface warns / errors inline so the user catches truncation, retries, etc.
+        if (event.level === 'warn' || event.level === 'error') {
+          useChatStore.getState().append({
+            id: nextChatId('msg'),
+            type: 'system',
+            variant: event.level === 'error' ? 'error' : 'warning',
+            createdAt: new Date().toISOString(),
+            text: event.message,
+          });
+        }
       } else if (event.type === 'finished') {
         off();
         if (event.status === 'succeeded') {

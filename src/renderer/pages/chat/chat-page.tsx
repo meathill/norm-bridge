@@ -57,6 +57,7 @@ export function ChatPage() {
           text:
             `🔌 LLM 已就绪：模型 ${status.compileModel} / ${status.searchModel}` +
             (status.baseURL ? ` · endpoint ${status.baseURL}` : ' · endpoint OpenAI 默认') +
+            ` · API ${status.apiStyle === 'responses' ? 'Responses' : 'Chat Completions'}` +
             (status.apiKeyMasked ? ` · key ${status.apiKeyMasked}` : ''),
         });
       } else {

@@ -39,7 +39,21 @@ its standard code, the citing clause if obvious, an optional referenced clause, 
 - unknown: when the relationship is not stated
 Cite the block ids you read each from. NEVER invent quotes.`;
 
-const DEFAULT_MAX_PROMPT_BLOCKS = 8000;
+/**
+ * Default cap for blocks shipped in a single LLM call. v0.1 doesn't chunk yet,
+ * so a 957-page PDF with ~70 blocks/page (≈ 67k blocks) gets aggressively
+ * truncated. 2000 blocks ≈ 25-40 pages, which fits comfortably inside any
+ * mainstream 32k-context model. Override via NORMBRIDGE_MAX_BLOCKS_PER_PROMPT.
+ */
+const DEFAULT_MAX_PROMPT_BLOCKS = 2000;
+
+function envMaxBlocks(): number | null {
+  const raw = (process.env['NORMBRIDGE_MAX_BLOCKS_PER_PROMPT'] ?? '').trim();
+  if (!raw) return null;
+  const n = Number.parseInt(raw, 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
 
 export type OpenAiRunnerOptions = {
   /** Override model for this runner only; otherwise reads NORMBRIDGE_COMPILE_MODEL / NORMBRIDGE_AGENT_MODEL. */
@@ -50,11 +64,17 @@ export type OpenAiRunnerOptions = {
 export class OpenAiAgentRunner implements AgentRunner {
   readonly id = 'openai-agents';
   private readonly explicitModel?: string;
-  private readonly maxBlocks: number;
+  private readonly explicitMaxBlocks?: number;
 
   constructor(opts?: OpenAiRunnerOptions) {
     if (opts?.model) this.explicitModel = opts.model;
-    this.maxBlocks = opts?.maxBlocksPerPrompt ?? DEFAULT_MAX_PROMPT_BLOCKS;
+    if (opts?.maxBlocksPerPrompt !== undefined) {
+      this.explicitMaxBlocks = opts.maxBlocksPerPrompt;
+    }
+  }
+
+  private get maxBlocks(): number {
+    return this.explicitMaxBlocks ?? envMaxBlocks() ?? DEFAULT_MAX_PROMPT_BLOCKS;
   }
 
   async compile(
@@ -65,11 +85,19 @@ export class OpenAiAgentRunner implements AgentRunner {
     const cfg = configureOpenAiRuntime();
     const model = this.explicitModel ?? cfg.compileModel;
 
-    const text = blocksToPromptText(ctx.textBlocks, this.maxBlocks);
+    const cap = this.maxBlocks;
+    const text = blocksToPromptText(ctx.textBlocks, cap);
     await callbacks?.onLog?.(
       'info',
-      `openai-agent-runner: model=${model}, baseURL=${cfg.baseURL ?? '(default)'}`,
+      `openai-agent-runner: model=${model}, baseURL=${cfg.baseURL ?? '(default)'}, api=${cfg.apiStyle}`,
     );
+    if (ctx.textBlocks.length > cap) {
+      await callbacks?.onLog?.(
+        'warn',
+        `输入文本块 ${ctx.textBlocks.length} 个超过单次上限 ${cap}，已截断处理前 ${cap} 个。` +
+          `如需处理全部内容，请提高 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT 或等后续分片支持。`,
+      );
+    }
 
     const clauseAgent = new Agent({
       name: 'ClauseCompiler',

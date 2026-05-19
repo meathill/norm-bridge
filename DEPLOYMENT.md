@@ -103,9 +103,12 @@ pnpm dev
 | 现象 | 可能原因 | 修法 |
 |---|---|---|
 | 启动横幅红色「LLM 配置未就绪」 | `.env` 缺 `OPENAI_API_KEY` 或拼写错 | 检查 .env，重启 |
+| 编译 / 搜索失败 `404 <html>...openresty...` | endpoint 不支持 `/v1/responses` 新接口 | 默认已经是 `chat_completions`；若你显式设过 `OPENAI_API_STYLE=responses` 就改回来 |
 | 分析 / 搜索一直转圈 | 自定义 `OPENAI_BASE_URL` 不通或限流 | 命令行直接 curl 一下 endpoint；检查代理 |
-| `agent_output_invalid` | 模型不支持 structured output | 换成 `gpt-4.1-mini` / `gpt-4o-mini` / `deepseek-chat` |
+| `agent_output_invalid` | 模型不支持 structured output / json_schema | 换成 `gpt-4.1-mini` / `gpt-4o-mini` / `deepseek-chat` / Azure 上启用 structured outputs 的部署 |
+| 编译卡在 clauses 阶段返回 token / context 错误 | PDF 太长一次塞不下模型上下文 | 调小 `NORMBRIDGE_MAX_BLOCKS_PER_PROMPT`（默认 2000）或换支持更长 context 的模型；v0.1 不分片 |
 | 拖入 PDF 后 inspection 显示「无文本层」 | 是扫描件 | v0.1 不做 OCR，需要先用 Adobe / `ocrmypdf` 跑过文字层 |
+| 编译完成但 clauses 数量很少 | 截断生效（chat 里有黄色警告） | 看警告里的截断比例；调高 `NORMBRIDGE_MAX_BLOCKS_PER_PROMPT` 或换大上下文模型 |
 | 搜索返回 0 条 | 关键词没命中要求文本 | 看上面卡片里的 token 列表，换一种描述 |
 
 ## 7. 数据存储
