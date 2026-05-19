@@ -11,6 +11,7 @@ type JobStoreState = {
   refreshJob(jobId: string): Promise<void>;
   refreshList(filter?: { sourceId?: string }): Promise<void>;
   startStandardExtract(sourceId: string): Promise<string>;
+  startSchemaCompile(sourceId: string): Promise<string>;
 };
 
 let unsubscribe: (() => void) | null = null;
@@ -82,6 +83,13 @@ export const useJobStore = create<JobStoreState>((set, get) => ({
   async startStandardExtract(sourceId) {
     get().ensureSubscribed();
     const { jobId } = await window.nb.job.startStandardExtract({ sourceId });
+    await get().refreshJob(jobId);
+    return jobId;
+  },
+
+  async startSchemaCompile(sourceId) {
+    get().ensureSubscribed();
+    const { jobId } = await window.nb.job.startSchemaCompile({ sourceId });
     await get().refreshJob(jobId);
     return jobId;
   },

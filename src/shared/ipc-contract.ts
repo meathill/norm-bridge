@@ -40,6 +40,10 @@ export type IpcContract = {
     req: StartStandardExtractInput;
     res: StartJobResult;
   };
+  'job:start-schema-compile': {
+    req: { sourceId: string };
+    res: StartJobResult;
+  };
   'job:get': { req: { jobId: string }; res: JobInfo | null };
   'job:list': { req: { kind?: JobKind; sourceId?: string }; res: JobInfo[] };
   /** Reads a JSON artifact at artifacts/&lt;scope&gt;/&lt;ownerId&gt;/&lt;name&gt; for the renderer to display. */
@@ -74,6 +78,9 @@ export type NbApi = {
     startStandardExtract(
       req: IpcReq<'job:start-standard-extract'>,
     ): Promise<IpcRes<'job:start-standard-extract'>>;
+    startSchemaCompile(
+      req: IpcReq<'job:start-schema-compile'>,
+    ): Promise<IpcRes<'job:start-schema-compile'>>;
     get(req: IpcReq<'job:get'>): Promise<IpcRes<'job:get'>>;
     list(req: IpcReq<'job:list'>): Promise<IpcRes<'job:list'>>;
     onEvent(handler: (event: JobEvent) => void): () => void;

@@ -25,6 +25,7 @@ const api: NbApi = {
   },
   job: {
     startStandardExtract: (req) => invoke('job:start-standard-extract', req),
+    startSchemaCompile: (req) => invoke('job:start-schema-compile', req),
     get: (req) => invoke('job:get', req),
     list: (req) => invoke('job:list', req),
     onEvent: (handler) => {

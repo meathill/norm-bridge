@@ -5,6 +5,7 @@ import type { ImportService } from '@main/services/import-service';
 import type { JobBus } from '@main/services/job-bus';
 import type { JobService } from '@main/services/job-service';
 import type { ProjectSession } from '@main/services/project-session';
+import type { SchemaCompileService } from '@main/services/schema-compile-service';
 import { registerProjectHandlers } from './project.handlers';
 import { registerDialogHandlers } from './dialog.handlers';
 import { registerAppHandlers } from './app.handlers';
@@ -26,6 +27,7 @@ export type IpcDeps = {
   session: ProjectSession;
   importService: ImportService;
   jobService: JobService;
+  schemaCompileService: SchemaCompileService;
   jobBus: JobBus;
   artifacts: ArtifactStore;
 };

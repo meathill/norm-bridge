@@ -1,5 +1,5 @@
 /** TECH_SPEC §15.1 — initial job kinds for v0.1. */
-export type JobKind = 'standard_extract';
+export type JobKind = 'standard_extract' | 'schema_compile';
 
 export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled';
 
@@ -39,6 +39,12 @@ export type JobEvent =
 
 export type StartStandardExtractInput = {
   sourceId: string;
+};
+
+export type StartSchemaCompileInput = {
+  sourceId: string;
+  /** Override the default runner. If absent the service picks based on env. */
+  runner?: 'mock' | 'openai';
 };
 
 export type StartJobResult = {

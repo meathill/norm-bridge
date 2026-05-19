@@ -1,10 +1,14 @@
 import type { HandlerRegistrar, IpcDeps } from './register-all';
 
 export function registerJobHandlers(register: HandlerRegistrar, deps: IpcDeps): void {
-  const { jobService } = deps;
+  const { jobService, schemaCompileService } = deps;
 
   register('job:start-standard-extract', ({ sourceId }) => {
     return jobService.startStandardExtract({ sourceId });
+  });
+
+  register('job:start-schema-compile', ({ sourceId }) => {
+    return schemaCompileService.start({ sourceId });
   });
 
   register('job:get', ({ jobId }) => {
