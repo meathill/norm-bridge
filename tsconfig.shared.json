@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "composite": true,
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "lib": ["ES2023"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": false,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "rootDir": "src/shared",
+    "outDir": "out/types/shared",
+    "tsBuildInfoFile": "out/types/shared.tsbuildinfo",
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "paths": {
+      "@shared/*": ["./*"]
+    },
+    "baseUrl": "./src/shared"
+  },
+  "include": ["src/shared/**/*.ts"]
+}
