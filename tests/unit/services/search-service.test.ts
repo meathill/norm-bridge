@@ -82,6 +82,7 @@ describe('SearchService (mock runner + LIKE retriever)', () => {
       bus,
       sqlite,
       new MockAgentRunner(),
+      parsers,
     );
     searchService = new SearchService(session, sqlite, new MockSearchRunner());
 

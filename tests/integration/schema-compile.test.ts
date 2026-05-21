@@ -65,6 +65,7 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
       bus,
       sqlite,
       new MockAgentRunner(),
+      parsers,
     );
   });
 

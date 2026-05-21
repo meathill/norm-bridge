@@ -9,9 +9,9 @@ import {
 } from '@shared/domain/standard-schema';
 import type {
   CitationAnchor,
-  ClauseCandidate,
-  ReferenceCandidate,
-  RequirementCandidate,
+  ClauseCompilerOutput,
+  ReferenceResolverOutput,
+  RequirementExtractorOutput,
 } from '@shared/schemas/agent-outputs';
 import {
   clauseCompilerOutputSchema,
@@ -19,10 +19,13 @@ import {
   requirementExtractorOutputSchema,
 } from '@shared/schemas/agent-outputs';
 import { standardSchemaArtifactSchema } from '@shared/schemas/standard-schema.v0.1';
-import type { AgentCompileResult, AgentRunner } from '@agents/agent-runner';
+import type { AgentRunner } from '@agents/agent-runner';
 import { newId } from '@shared/ids';
 import type { PdfPageInfo, PdfTextBlock } from '@shared/domain/pdf-extract';
+import type { SectionEntry, SectionMap } from '@shared/domain/section';
 import type { SourceFile } from '@shared/domain/source';
+import type { ParserRegistry } from '@main/parsers/parser-registry';
+import type { PdfParser } from '@main/parsers/pdf/pdf-parser';
 import type { ArtifactStore } from './artifact-store';
 import type { JobBus, JobHandle } from './job-bus';
 import type { ProjectSession } from './project-session';
@@ -35,13 +38,31 @@ export type StartSchemaCompileInput = {
   runner?: AgentRunner;
 };
 
-export type SchemaCompileSummary = {
-  standardId: string;
-  clauseCount: number;
-  requirementCount: number;
-  citationCount: number;
-  referenceCount: number;
-  needsReviewCount: number;
+/** How many sections to process per compile run while we validate the approach. */
+function maxSections(): number {
+  const raw = (process.env['NORMBRIDGE_MAX_SECTIONS'] ?? '').trim();
+  const n = Number.parseInt(raw, 10);
+  if (Number.isFinite(n) && n > 0) return n;
+  return 5;
+}
+
+type BuiltSchema = {
+  standard: StandardRecord;
+  clauses: ClauseRecord[];
+  requirements: RequirementRecord[];
+  references: StandardReferenceRecord[];
+  citations: CitationRecord[];
+  compiledAt: string;
+  sectionsProcessed: number;
+  sectionsTotal: number;
+  refs: {
+    clauses: string;
+    requirements: string;
+    citations: string;
+    references: string;
+    bundle: string;
+    sections: string;
+  };
 };
 
 export class SchemaCompileService {
@@ -52,6 +73,7 @@ export class SchemaCompileService {
     private readonly bus: JobBus,
     private readonly sqlite: SqliteService,
     private readonly defaultRunner: AgentRunner,
+    private readonly parsers: ParserRegistry,
   ) {}
 
   async start(input: StartSchemaCompileInput): Promise<{ jobId: string }> {
@@ -64,7 +86,6 @@ export class SchemaCompileService {
     }
 
     const runner = input.runner ?? this.defaultRunner;
-
     const handle = await this.bus.create({
       kind: 'schema_compile',
       sourceId: source.id,
@@ -73,6 +94,7 @@ export class SchemaCompileService {
         sourceId: source.id,
         runner: runner.id,
         agentSchemaVersion: STANDARD_SCHEMA_VERSION,
+        maxSections: maxSections(),
       },
     });
 
@@ -101,76 +123,42 @@ export class SchemaCompileService {
       });
       const blockIndex = new Map(textBlocks.map((b) => [b.id, b]));
 
-      await handle.emitProgress(0.1, `running ${runner.id}`);
-      let raw: AgentCompileResult;
-      try {
-        raw = await runner.compile(
-          {
-            sourceId: source.id,
-            sourceOriginalName: source.originalName,
-            pages,
-            textBlocks,
-          },
-          {
-            onLog: (level, message) => handle.emitLog(level, `[${runner.id}] ${message}`),
-            onProgress: async (stage, ratio) => {
-              const stageOffset = stage === 'clauses' ? 0.1 : stage === 'requirements' ? 0.4 : 0.65;
-              await handle.emitProgress(stageOffset + ratio * 0.2, `${stage}`);
-            },
-          },
-        );
-      } catch (err) {
-        await this.recordAgentFailure(handle, source.id, runner.id, err as Error);
-        throw err;
-      }
+      // Section map from the printed TOC (reliable page ranges); fall back to a
+      // single whole-document chunk when the document has no parseable TOC.
+      const absPath = this.sources.resolveAbsolutePath({ directory: project.directory }, source);
+      const pdfParser = this.parsers.requirePdf() as PdfParser;
+      const sectionMap = await pdfParser.getSectionMap({ filePath: absPath });
+      await this.artifacts.writeJson(
+        project,
+        { scope: 'standards', ownerId: source.id, name: 'sections.json' },
+        sectionMap,
+      );
 
-      // Defensive re-validation; the runner already returned typed values but we
-      // belt-and-brace this so a bad mock or out-of-band SDK update fails loud.
-      const clausesOut = clauseCompilerOutputSchema.safeParse(raw.clauses);
-      const requirementsOut = requirementExtractorOutputSchema.safeParse(raw.requirements);
-      const referencesOut = referenceResolverOutputSchema.safeParse(raw.references);
-      if (!clausesOut.success || !requirementsOut.success || !referencesOut.success) {
-        const reason = [
-          !clausesOut.success ? `clauses: ${clausesOut.error?.message}` : null,
-          !requirementsOut.success ? `requirements: ${requirementsOut.error?.message}` : null,
-          !referencesOut.success ? `references: ${referencesOut.error?.message}` : null,
-        ]
-          .filter(Boolean)
-          .join(' | ');
-        const err = new Error(`agent_output_invalid: ${reason}`);
-        await this.recordAgentFailure(handle, source.id, runner.id, err);
-        throw err;
-      }
-
-      const built = this.buildRecords({
+      const built = await this.compile({
+        handle,
+        runner,
         source,
         pages,
         textBlocks,
         blockIndex,
-        clauses: clausesOut.data.clauses,
-        requirements: requirementsOut.data.requirements,
-        references: referencesOut.data.references,
+        sectionMap,
       });
 
-      await handle.emitProgress(0.85, 'writing artifacts');
+      await handle.emitProgress(0.9, 'writing artifacts');
       await this.writeArtifacts(built);
-      for (const ref of [
-        built.refs.clauses,
-        built.refs.requirements,
-        built.refs.citations,
-        built.refs.references,
-        built.refs.bundle,
-      ]) {
-        await handle.emitArtifactWritten(ref);
+      for (const ref of Object.values(built.refs)) {
+        if (ref) await handle.emitArtifactWritten(ref);
       }
 
-      await handle.emitProgress(0.95, 'writing to SQLite');
+      await handle.emitProgress(0.96, 'writing to SQLite');
       this.persistToSqlite(built);
 
       this.writeAudit('schema_compiled', 'source', source.id, {
         jobId: handle.id,
         runner: runner.id,
         standardId: built.standard.id,
+        sectionsProcessed: built.sectionsProcessed,
+        sectionsTotal: built.sectionsTotal,
         clauses: built.clauses.length,
         requirements: built.requirements.length,
         citations: built.citations.length,
@@ -191,50 +179,212 @@ export class SchemaCompileService {
     }
   }
 
-  private buildRecords(input: {
+  private async compile(args: {
+    handle: JobHandle;
+    runner: AgentRunner;
     source: SourceFile;
     pages: PdfPageInfo[];
     textBlocks: PdfTextBlock[];
     blockIndex: Map<string, PdfTextBlock>;
-    clauses: ClauseCandidate[];
-    requirements: RequirementCandidate[];
-    references: ReferenceCandidate[];
-  }) {
+    sectionMap: SectionMap;
+  }): Promise<BuiltSchema> {
+    const { handle, runner, source, pages, textBlocks, blockIndex, sectionMap } = args;
     const now = new Date().toISOString();
     const standardId = newId('standard');
     const standard: StandardRecord = {
       id: standardId,
-      sourceId: input.source.id,
-      title: input.source.originalName,
+      sourceId: source.id,
+      title: source.originalName,
       status: 'compiled',
       createdAt: now,
       updatedAt: now,
     };
 
+    const clauses: ClauseRecord[] = [];
+    const requirements: RequirementRecord[] = [];
+    const references: StandardReferenceRecord[] = [];
     const citations: CitationRecord[] = [];
-    const localToClauseId = new Map<string, string>();
 
-    const clauseRecords: ClauseRecord[] = [];
-    // First pass: assign clause ids.
-    for (const c of input.clauses) {
-      const id = newId('clause');
-      localToClauseId.set(c.localId, id);
+    // Choose the units of work: real sections when we have a TOC, otherwise one
+    // synthetic "whole document" section.
+    const contentSections = sectionMap.entries.filter((s) => s.looksLikeContent);
+    const selected = contentSections.length > 0 ? contentSections.slice(0, maxSections()) : [];
+    const useSections = selected.length > 0;
+
+    if (!useSections) {
+      await handle.emitLog(
+        'warn',
+        sectionMap.source === 'none'
+          ? '未能从目录解析出章节，退回整文档单次处理（受 token 上限截断）。'
+          : '目录解析到的章节均判为非正文，退回整文档单次处理。',
+      );
+    } else {
+      await handle.emitLog(
+        'info',
+        `目录解析到 ${sectionMap.entries.length} 节，本次处理前 ${selected.length} 节。`,
+      );
     }
-    // Second pass: build records (so parent ids are resolvable).
-    for (const c of input.clauses) {
+
+    const units = useSections ? selected : [syntheticWholeDocSection(standardId, pages)];
+
+    for (let i = 0; i < units.length; i++) {
+      const section = units[i];
+      if (!section) continue;
+      const sectionBlocks = useSections
+        ? textBlocks.filter((b) => b.page >= section.pageStart && b.page <= section.pageEnd)
+        : textBlocks;
+      const sectionPages = pages.filter(
+        (p) => p.page >= section.pageStart && p.page <= section.pageEnd,
+      );
+
+      const label = useSections
+        ? `第 ${i + 1}/${units.length} 节 · ${section.title} (p${section.pageStart}-${section.pageEnd})`
+        : '整文档';
+      await handle.emitProgress(0.1 + (i / units.length) * 0.75, label);
+
+      if (sectionBlocks.length === 0) {
+        await handle.emitLog('warn', `${label}：无文本块，跳过。`);
+        continue;
+      }
+
+      let raw: {
+        clauses: ClauseCompilerOutput;
+        requirements: RequirementExtractorOutput;
+        references: ReferenceResolverOutput;
+      };
+      try {
+        raw = await args.runner.compile(
+          {
+            sourceId: source.id,
+            sourceOriginalName: useSections
+              ? `${source.originalName} · ${section.title}`
+              : source.originalName,
+            pages: sectionPages,
+            textBlocks: sectionBlocks,
+          },
+          {
+            onLog: (level, message) => handle.emitLog(level, `[${runner.id}] ${message}`),
+          },
+        );
+      } catch (err) {
+        // One bad section shouldn't abort the whole run during validation.
+        await handle.emitLog('error', `${label} 抽取失败：${(err as Error).message}`);
+        this.writeAudit('agent_output_invalid', 'source', source.id, {
+          jobId: handle.id,
+          runner: runner.id,
+          section: section.clauseNoGuess ?? section.title,
+          error: (err as Error).message,
+        });
+        continue;
+      }
+
+      const clausesOut = clauseCompilerOutputSchema.safeParse(raw.clauses);
+      const requirementsOut = requirementExtractorOutputSchema.safeParse(raw.requirements);
+      const referencesOut = referenceResolverOutputSchema.safeParse(raw.references);
+      if (!clausesOut.success || !requirementsOut.success || !referencesOut.success) {
+        await handle.emitLog('error', `${label}：agent 输出未通过 schema 校验，跳过。`);
+        this.writeAudit('agent_output_invalid', 'source', source.id, {
+          jobId: handle.id,
+          section: section.clauseNoGuess ?? section.title,
+        });
+        continue;
+      }
+
+      this.appendSectionRecords({
+        standardId,
+        section: useSections ? section : null,
+        source,
+        blockIndex,
+        clauseOut: clausesOut.data,
+        requirementOut: requirementsOut.data,
+        referenceOut: referencesOut.data,
+        out: { clauses, requirements, references, citations },
+      });
+    }
+
+    return {
+      standard,
+      clauses,
+      requirements,
+      references,
+      citations,
+      compiledAt: now,
+      sectionsProcessed: units.length,
+      sectionsTotal: sectionMap.entries.length || 1,
+      refs: {
+        clauses: '',
+        requirements: '',
+        citations: '',
+        references: '',
+        bundle: '',
+        sections: '',
+      },
+    };
+  }
+
+  /**
+   * Turn one section's agent output into records and append to the shared
+   * accumulators. localId↔clauseId mapping is scoped to this section so ids
+   * never collide across sections. When a section header is known (from the
+   * TOC), it becomes a synthetic root clause and top-level agent clauses hang
+   * under it.
+   */
+  private appendSectionRecords(args: {
+    standardId: string;
+    section: SectionEntry | null;
+    source: SourceFile;
+    blockIndex: Map<string, PdfTextBlock>;
+    clauseOut: ClauseCompilerOutput;
+    requirementOut: RequirementExtractorOutput;
+    referenceOut: ReferenceResolverOutput;
+    out: {
+      clauses: ClauseRecord[];
+      requirements: RequirementRecord[];
+      references: StandardReferenceRecord[];
+      citations: CitationRecord[];
+    };
+  }): void {
+    const {
+      standardId,
+      section,
+      source,
+      blockIndex,
+      clauseOut,
+      requirementOut,
+      referenceOut,
+      out,
+    } = args;
+
+    let rootClauseId: string | null = null;
+    if (section) {
+      rootClauseId = section.id;
+      out.clauses.push({
+        id: section.id,
+        standardId,
+        parentClauseId: null,
+        ...(section.clauseNoGuess ? { clauseNo: section.clauseNoGuess } : {}),
+        title: section.title,
+        pageStart: section.pageStart,
+        pageEnd: section.pageEnd,
+        reviewStatus: 'unreviewed',
+      });
+    }
+
+    const localToClauseId = new Map<string, string>();
+    for (const c of clauseOut.clauses) {
+      localToClauseId.set(c.localId, newId('clause'));
+    }
+
+    for (const c of clauseOut.clauses) {
       const id = localToClauseId.get(c.localId);
       if (!id) continue;
-      // Build citations for this clause's anchors.
-      const clauseCitationIds = anchorsToCitations(
-        c.citationAnchors,
-        input.source,
-        input.blockIndex,
-        citations,
-      );
-      clauseRecords.push({
+      const parentId = c.parentLocalId
+        ? (localToClauseId.get(c.parentLocalId) ?? rootClauseId)
+        : rootClauseId;
+      out.clauses.push({
         id,
         standardId,
-        parentClauseId: c.parentLocalId ? (localToClauseId.get(c.parentLocalId) ?? null) : null,
+        parentClauseId: parentId,
         ...(c.clauseNo ? { clauseNo: c.clauseNo } : {}),
         ...(c.title ? { title: c.title } : {}),
         pageStart: c.pageStart,
@@ -242,23 +392,12 @@ export class SchemaCompileService {
         ...(c.rawText ? { rawText: c.rawText } : {}),
         reviewStatus: 'unreviewed',
       });
-      // Citations are not pinned to the clause directly in the table, but we still
-      // need them written so requirement and reference rows can FK to them.
-      void clauseCitationIds;
     }
 
-    const requirementRecords: RequirementRecord[] = [];
-    for (const r of input.requirements) {
-      const citationIds = anchorsToCitations(
-        r.citationAnchors,
-        input.source,
-        input.blockIndex,
-        citations,
-      );
-      const clauseId = localToClauseId.get(r.localClauseId);
-      const reviewStatus: RequirementRecord['reviewStatus'] =
-        citationIds.length === 0 ? 'needs_review' : 'unreviewed';
-      const record: RequirementRecord = {
+    for (const r of requirementOut.requirements) {
+      const citationIds = anchorsToCitations(r.citationAnchors, source, blockIndex, out.citations);
+      const clauseId = localToClauseId.get(r.localClauseId) ?? rootClauseId ?? undefined;
+      out.requirements.push({
         id: newId('requirement'),
         standardId,
         ...(clauseId ? { clauseId } : {}),
@@ -275,25 +414,24 @@ export class SchemaCompileService {
         ...(r.severity ? { severity: r.severity } : {}),
         confidence: r.confidence,
         citationIds,
-        reviewStatus,
-      };
-      requirementRecords.push(record);
+        reviewStatus: citationIds.length === 0 ? 'needs_review' : 'unreviewed',
+      });
     }
 
-    const referenceRecords: StandardReferenceRecord[] = [];
-    for (const ref of input.references) {
+    for (const ref of referenceOut.references) {
       const citationIds = anchorsToCitations(
         ref.citationAnchors,
-        input.source,
-        input.blockIndex,
-        citations,
+        source,
+        blockIndex,
+        out.citations,
       );
-      referenceRecords.push({
+      const fromClauseId = ref.fromLocalClauseId
+        ? (localToClauseId.get(ref.fromLocalClauseId) ?? rootClauseId ?? undefined)
+        : (rootClauseId ?? undefined);
+      out.references.push({
         id: newId('reference'),
         fromStandardId: standardId,
-        ...(ref.fromLocalClauseId
-          ? { fromClauseId: localToClauseId.get(ref.fromLocalClauseId) }
-          : {}),
+        ...(fromClauseId ? { fromClauseId } : {}),
         referencedStandardCode: ref.referencedStandardCode,
         ...(ref.referencedClause ? { referencedClause: ref.referencedClause } : {}),
         ...(ref.relationType ? { relationType: ref.relationType } : {}),
@@ -301,56 +439,26 @@ export class SchemaCompileService {
         reviewStatus: citationIds.length === 0 ? 'needs_review' : 'unreviewed',
       });
     }
-
-    return {
-      standard,
-      clauses: clauseRecords,
-      requirements: requirementRecords,
-      references: referenceRecords,
-      citations,
-      compiledAt: now,
-      refs: {
-        clauses: '',
-        requirements: '',
-        citations: '',
-        references: '',
-        bundle: '',
-      } as {
-        clauses: string;
-        requirements: string;
-        citations: string;
-        references: string;
-        bundle: string;
-      },
-    };
   }
 
-  private async writeArtifacts(built: ReturnType<typeof this.buildRecords>): Promise<void> {
+  private async writeArtifacts(built: BuiltSchema): Promise<void> {
     const project = this.session.getCurrent();
     if (!project) throw new Error('Project closed before artifact write.');
-
     const sourceId = built.standard.sourceId;
 
-    const clausesRef = await this.artifacts.writeJson(
-      project,
-      { scope: 'standards', ownerId: sourceId, name: 'clauses.json' },
-      built.clauses,
-    );
-    const reqsRef = await this.artifacts.writeJson(
-      project,
-      { scope: 'standards', ownerId: sourceId, name: 'requirements.json' },
-      built.requirements,
-    );
-    const citationsRef = await this.artifacts.writeJson(
-      project,
-      { scope: 'standards', ownerId: sourceId, name: 'citations.json' },
-      built.citations,
-    );
-    const referencesRef = await this.artifacts.writeJson(
-      project,
-      { scope: 'standards', ownerId: sourceId, name: 'references.json' },
-      built.references,
-    );
+    const write = async (name: string, data: unknown) =>
+      (
+        await this.artifacts.writeJson(
+          project,
+          { scope: 'standards', ownerId: sourceId, name },
+          data,
+        )
+      ).relativePath;
+
+    built.refs.clauses = await write('clauses.json', built.clauses);
+    built.refs.requirements = await write('requirements.json', built.requirements);
+    built.refs.citations = await write('citations.json', built.citations);
+    built.refs.references = await write('references.json', built.references);
 
     const bundle: StandardSchemaArtifact = {
       schemaVersion: STANDARD_SCHEMA_VERSION,
@@ -361,44 +469,32 @@ export class SchemaCompileService {
       references: built.references,
       compiledAt: built.compiledAt,
     };
-    // Validate the bundled artifact before we commit anything to disk irrevocably.
     const parsed = standardSchemaArtifactSchema.safeParse(bundle);
     if (!parsed.success) {
       throw new Error(`standard-schema bundle failed validation: ${parsed.error.message}`);
     }
-
-    const bundleRef = await this.artifacts.writeJson(
-      project,
-      { scope: 'standards', ownerId: sourceId, name: 'standard-schema.v0.1.json' },
-      bundle,
-    );
-
-    built.refs.clauses = clausesRef.relativePath;
-    built.refs.requirements = reqsRef.relativePath;
-    built.refs.citations = citationsRef.relativePath;
-    built.refs.references = referencesRef.relativePath;
-    built.refs.bundle = bundleRef.relativePath;
+    built.refs.bundle = await write('standard-schema.v0.1.json', bundle);
   }
 
-  private persistToSqlite(built: ReturnType<typeof this.buildRecords>): void {
+  private persistToSqlite(built: BuiltSchema): void {
     this.sqlite.tx(() => {
-      const insStd = this.sqlite.prepare(
-        `INSERT INTO standards (id, source_id, title, country_or_region, version, publication_date, scope, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      const s = built.standard;
-      insStd.run(
-        s.id,
-        s.sourceId,
-        s.title ?? null,
-        s.countryOrRegion ?? null,
-        s.version ?? null,
-        s.publicationDate ?? null,
-        s.scope ?? null,
-        s.status,
-        s.createdAt,
-        s.updatedAt,
-      );
+      this.sqlite
+        .prepare(
+          `INSERT INTO standards (id, source_id, title, country_or_region, version, publication_date, scope, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          built.standard.id,
+          built.standard.sourceId,
+          built.standard.title ?? null,
+          built.standard.countryOrRegion ?? null,
+          built.standard.version ?? null,
+          built.standard.publicationDate ?? null,
+          built.standard.scope ?? null,
+          built.standard.status,
+          built.standard.createdAt,
+          built.standard.updatedAt,
+        );
 
       const insCit = this.sqlite.prepare(
         `INSERT INTO citations (id, source_id, source_hash, page, sheet_name, cell_ref, paragraph_index, table_index, clause_no, text_start, text_end, bbox_json, quote)
@@ -466,9 +562,7 @@ export class SchemaCompileService {
           r.confidence,
           r.reviewStatus,
         );
-        for (const cid of r.citationIds) {
-          insReqCit.run(r.id, cid);
-        }
+        for (const cid of r.citationIds) insReqCit.run(r.id, cid);
       }
 
       const insRef = this.sqlite.prepare(
@@ -486,20 +580,6 @@ export class SchemaCompileService {
           ref.reviewStatus,
         );
       }
-    });
-  }
-
-  private async recordAgentFailure(
-    handle: JobHandle,
-    sourceId: string,
-    runnerId: string,
-    err: Error,
-  ): Promise<void> {
-    await handle.emitLog('error', `agent failure: ${err.message}`);
-    this.writeAudit('agent_output_invalid', 'source', sourceId, {
-      jobId: handle.id,
-      runner: runnerId,
-      error: err.message,
     });
   }
 
@@ -525,6 +605,18 @@ export class SchemaCompileService {
   }
 }
 
+function syntheticWholeDocSection(_standardId: string, pages: PdfPageInfo[]): SectionEntry {
+  const last = pages[pages.length - 1];
+  return {
+    id: newId('clause'),
+    title: 'Whole document',
+    pageStart: 1,
+    pageEnd: last?.page ?? 1,
+    level: 0,
+    looksLikeContent: true,
+  };
+}
+
 function anchorsToCitations(
   anchors: CitationAnchor[],
   source: SourceFile,
@@ -533,7 +625,6 @@ function anchorsToCitations(
 ): string[] {
   const ids: string[] = [];
   for (const a of anchors) {
-    // Compute a bbox union from the anchor's text blocks when they exist; otherwise skip.
     const blocks = a.textBlockIds.map((id) => blockIndex.get(id)).filter(Boolean) as PdfTextBlock[];
     if (blocks.length === 0) continue;
     const xs = blocks.map((b) => b.bbox.x);

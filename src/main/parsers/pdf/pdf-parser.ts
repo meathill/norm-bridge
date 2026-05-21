@@ -7,12 +7,14 @@ import type {
   PdfPageInfo,
   PdfTextBlock,
 } from '@shared/domain/pdf-extract';
+import type { SectionMap } from '@shared/domain/section';
 import type {
   DocumentParser,
   ParserInspectInput,
   ParserSupportInput,
 } from '@main/parsers/document-parser';
 import { pageDimensions, textItemToTopLeftBbox } from './pdf-coords';
+import { parseSectionTocLines } from './section-toc';
 
 const PDF_EXT = new Set(['.pdf']);
 const PDF_MIME = new Set(['application/pdf', 'application/x-pdf']);
@@ -246,4 +248,64 @@ export class PdfParser implements DocumentParser {
 
     return { sourceId, pages, textBlocks };
   }
+
+  /**
+   * Build a section map from the printed table of contents. We scan the front
+   * matter, reconstruct each visual line, and parse "SECTION dd dd dd<page>"
+   * rows. Page numbers in these TOCs match PDF page indices (verified against
+   * the embedded outline), so no offset correction is needed.
+   *
+   * Returns `source: 'none'` when no parseable TOC is found, leaving the caller
+   * to fall back to page-window chunking.
+   */
+  async getSectionMap({ filePath }: { filePath: string }): Promise<SectionMap> {
+    const fileBuffer = await readFile(filePath);
+    const pdfjs = await loadPdfjs();
+    const data = new Uint8Array(fileBuffer.buffer, fileBuffer.byteOffset, fileBuffer.byteLength);
+    const doc = await pdfjs.getDocument({
+      data,
+      useSystemFonts: true,
+      disableFontFace: true,
+    }).promise;
+    const numPages = doc.numPages;
+    const scanPages = Math.min(20, numPages);
+
+    const lines: string[] = [];
+    for (let p = 1; p <= scanPages; p++) {
+      const page = await doc.getPage(p);
+      const tc = await page.getTextContent();
+      lines.push(...reconstructLines(tc.items));
+      page.cleanup();
+    }
+
+    await doc.cleanup();
+    await doc.destroy();
+
+    const entries = parseSectionTocLines(lines, numPages);
+    if (entries.length < 3) {
+      return { source: 'none', entries: [] };
+    }
+    return { source: 'printed_toc', entries };
+  }
+}
+
+/**
+ * Group text items into visual lines by their y coordinate, then join each
+ * line's fragments with no separator (the printed TOC's dotted leaders are not
+ * in the text layer, so section number and page sit flush).
+ */
+function reconstructLines(items: unknown[]): string[] {
+  const lines = new Map<number, string[]>();
+  for (const it of items) {
+    const t = it as { str?: string; transform?: number[] };
+    if (typeof t.str !== 'string' || t.str.trim().length === 0) continue;
+    if (!t.transform) continue;
+    const y = Math.round(t.transform[5] ?? 0);
+    const arr = lines.get(y) ?? [];
+    arr.push(t.str);
+    lines.set(y, arr);
+  }
+  return [...lines.entries()]
+    .sort((a, b) => b[0] - a[0])
+    .map(([, parts]) => parts.join('').replace(/ /g, ' '));
 }

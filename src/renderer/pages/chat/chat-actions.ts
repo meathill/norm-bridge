@@ -120,7 +120,7 @@ export async function startAnalysisForSource(
       useChatStore.getState().update(compileMsgId, patch);
     });
 
-    // Read the bundle for the final summary message.
+    // Read the bundle + section map for the final summary message.
     try {
       const bundle = await window.nb.artifact.readJson<{
         clauses: unknown[];
@@ -128,13 +128,25 @@ export async function startAnalysisForSource(
         references: unknown[];
         citations: unknown[];
       }>({ scope: 'standards', ownerId: sourceId, name: 'standard-schema.v0.1.json' });
+      const sections = await window.nb.artifact
+        .readJson<{ source: string; entries: unknown[] }>({
+          scope: 'standards',
+          ownerId: sourceId,
+          name: 'sections.json',
+        })
+        .catch(() => null);
+      const sectionLine =
+        sections && sections.entries.length > 0
+          ? `目录共 ${sections.entries.length} 节（来源：${sections.source === 'printed_toc' ? '印刷目录' : sections.source}）。`
+          : '未解析到章节目录，按整文档处理。';
       useChatStore.getState().append({
         id: nextChatId('msg'),
         type: 'system',
         variant: 'success',
         createdAt: new Date().toISOString(),
         text:
-          `✅ 已编译标准索引：${bundle.clauses.length} 条款、${bundle.requirements.length} 个 requirement、` +
+          `✅ 已编译标准索引。${sectionLine}\n` +
+          `得到 ${bundle.clauses.length} 条款、${bundle.requirements.length} 个 requirement、` +
           `${bundle.references.length} 个引用标准、${bundle.citations.length} 条 citation。` +
           `\n现在可以在下方输入产品描述启动查询。`,
       });

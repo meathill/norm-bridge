@@ -51,6 +51,7 @@ const schemaCompileService = new SchemaCompileService(
   jobBus,
   sqliteService,
   agentRunner,
+  parserRegistry,
 );
 const searchRunner = resolveSearchRunner();
 const searchService = new SearchService(projectSession, sqliteService, searchRunner);
