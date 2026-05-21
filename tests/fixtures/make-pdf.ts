@@ -1,13 +1,14 @@
 /**
  * Generate a tiny valid PDF entirely in code so tests can run without binary fixtures.
  *
- * The output is a 1-page Letter-sized PDF whose content stream draws the given text
- * with Helvetica 24pt. The xref table is built from the actual byte offsets so pdfjs
- * accepts it without warnings.
+ * The xref table is built from actual byte offsets so pdfjs accepts it without
+ * warnings. Multi-line content is drawn at 12pt, one text line per visual row,
+ * so each line stays on-page and extracts cleanly (a single long line overflows
+ * the page width and pdfjs drops the overflow).
  */
-export function makeMinimalPdf(options: { text?: string } = {}): Buffer {
-  const text = options.text ?? 'Hello NormBridge';
-  const contentStream = `BT\n/F1 24 Tf\n100 700 Td\n(${text}) Tj\nET\n`;
+export function makeMinimalPdf(options: { text?: string; lines?: string[] } = {}): Buffer {
+  const lines = options.lines ?? [options.text ?? 'Hello NormBridge'];
+  const contentStream = buildContentStream(lines);
 
   const objects: string[] = [
     '<< /Type /Catalog /Pages 2 0 R >>',
@@ -38,6 +39,18 @@ export function makeMinimalPdf(options: { text?: string } = {}): Buffer {
   const trailer = `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
 
   return Buffer.from(header + body + xref + trailer, 'latin1');
+}
+
+function buildContentStream(lines: string[]): string {
+  const rows = lines.map((line, i) => {
+    const y = 740 - i * 16;
+    return `1 0 0 1 72 ${y} Tm\n(${escapePdfText(line)}) Tj`;
+  });
+  return `BT\n/F1 12 Tf\n${rows.join('\n')}\nET\n`;
+}
+
+function escapePdfText(text: string): string {
+  return text.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
 }
 
 /**

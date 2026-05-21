@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import migration0001 from './0001_init.sql?raw';
+import migration0002 from './0002_catalog.sql?raw';
 
 export type Migration = {
   version: number;
@@ -18,4 +19,5 @@ function defineMigration(version: number, name: string, sql: string): Migration 
 
 export const MIGRATIONS: readonly Migration[] = [
   defineMigration(1, 'init', migration0001),
+  defineMigration(2, 'catalog', migration0002),
 ] as const;

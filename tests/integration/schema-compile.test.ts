@@ -80,9 +80,14 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
     writeFileSync(
       pdf,
       makeMinimalPdf({
-        text:
-          '1 Scope. This standard applies. 1.1 General. ' +
-          'The product shall be safe. 2 Normative references. IEC 60898-1:2015 applies.',
+        lines: [
+          '1 Scope',
+          'This standard applies to circuit breakers.',
+          '1.1 General',
+          'The product shall be safe.',
+          '2 Normative references',
+          'IEC 60898-1:2015 applies.',
+        ],
       }),
     );
     const imp = await importService.importFile({ filePath: pdf, kind: 'standard_pdf' });
@@ -137,6 +142,33 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
       .all() as Array<{ event_type: string }>;
     const types = audits.map((a) => a.event_type);
     expect(types).toContain('schema_compiled');
+
+    // 6. Standard registry: the imported standard + the referenced IEC code are catalogued.
+    // (Match by issuing_body rather than exact code: pdfjs may drop the space in
+    // "IEC 60898-1" when the whole fixture renders on one line.)
+    const catalog = sqlite
+      .prepare('SELECT code, origin, issuing_body FROM standard_catalog')
+      .all() as Array<{ code: string; origin: string; issuing_body: string | null }>;
+    expect(catalog.some((c) => c.origin === 'imported')).toBe(true);
+    const iec = catalog.find((c) => c.issuing_body === 'IEC');
+    expect(iec).toBeDefined();
+    expect(iec?.origin).toBe('referenced');
+
+    // The reference row is upgraded from free text to a catalog FK.
+    const refLinks = sqlite
+      .prepare('SELECT referenced_catalog_id FROM standard_references')
+      .all() as Array<{ referenced_catalog_id: string | null }>;
+    expect(refLinks.some((r) => r.referenced_catalog_id !== null)).toBe(true);
+
+    // An IEC issuing-body category exists and is linked.
+    const iecCategory = sqlite
+      .prepare("SELECT id FROM categories WHERE kind = 'issuing_body' AND code = 'IEC'")
+      .get() as { id: string } | undefined;
+    expect(iecCategory).toBeDefined();
+    const links = sqlite
+      .prepare('SELECT COUNT(*) as c FROM standard_categories WHERE category_id = ?')
+      .get(iecCategory!.id) as { c: number };
+    expect(links.c).toBeGreaterThanOrEqual(1);
   });
 
   it('refuses to compile when the source is not a standard PDF', async () => {

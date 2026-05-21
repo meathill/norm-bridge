@@ -14,6 +14,9 @@ export const ID_PREFIX = {
   matchResult: 'mat',
   job: 'job',
   auditEvent: 'aud',
+  catalog: 'cat',
+  category: 'cgy',
+  productRequiredStandard: 'prs',
 } as const;
 
 export type IdKind = keyof typeof ID_PREFIX;

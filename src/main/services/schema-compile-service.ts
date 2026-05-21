@@ -27,6 +27,7 @@ import type { SourceFile } from '@shared/domain/source';
 import type { ParserRegistry } from '@main/parsers/parser-registry';
 import type { PdfParser } from '@main/parsers/pdf/pdf-parser';
 import type { ArtifactStore } from './artifact-store';
+import { CatalogService } from './catalog-service';
 import type { JobBus, JobHandle } from './job-bus';
 import type { ProjectSession } from './project-session';
 import type { SourceRegistry } from './source-registry';
@@ -66,6 +67,8 @@ type BuiltSchema = {
 };
 
 export class SchemaCompileService {
+  private readonly catalog: CatalogService;
+
   constructor(
     private readonly session: ProjectSession,
     private readonly sources: SourceRegistry,
@@ -74,7 +77,9 @@ export class SchemaCompileService {
     private readonly sqlite: SqliteService,
     private readonly defaultRunner: AgentRunner,
     private readonly parsers: ParserRegistry,
-  ) {}
+  ) {
+    this.catalog = new CatalogService(sqlite);
+  }
 
   async start(input: StartSchemaCompileInput): Promise<{ jobId: string }> {
     const project = this.session.getCurrent();
@@ -152,6 +157,17 @@ export class SchemaCompileService {
 
       await handle.emitProgress(0.96, 'writing to SQLite');
       this.persistToSqlite(built);
+
+      // Build the standard registry + category tree from what we just compiled.
+      const catalogResult = this.catalog.sync({
+        standard: built.standard,
+        clauses: built.clauses,
+        references: built.references,
+      });
+      await handle.emitLog(
+        'info',
+        `注册表：导入标准 1 + 引用标准 ${catalogResult.referencedCount}，分类 ${catalogResult.categoryCount} 个。`,
+      );
 
       this.writeAudit('schema_compiled', 'source', source.id, {
         jobId: handle.id,

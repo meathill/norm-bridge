@@ -91,10 +91,14 @@ describe('SearchService (mock runner + LIKE retriever)', () => {
     writeFileSync(
       pdf,
       makeMinimalPdf({
-        text:
-          '4.1 Insulation. The miniature circuit breaker shall withstand 1500V for 1 minute. ' +
-          '4.2 Tripping. The breaker shall trip within 60ms at 1A nominal current. ' +
-          '4.3 Marking. The product shall be marked with rated current and voltage.',
+        lines: [
+          '4.1 Insulation',
+          'The miniature circuit breaker shall withstand 1500V for 1 minute.',
+          '4.2 Tripping',
+          'The breaker shall trip within 60ms at 1A nominal current.',
+          '4.3 Marking',
+          'The product shall be marked with rated current and voltage.',
+        ],
       }),
     );
     const imp = await importService.importFile({ filePath: pdf, kind: 'standard_pdf' });
