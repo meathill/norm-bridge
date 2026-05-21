@@ -169,29 +169,62 @@ function SearchResultBubble({ msg }: { msg: ChatSearchResultMessage }) {
         <p className="mt-3 text-xs text-muted-foreground">没有匹配的 requirement。</p>
       ) : (
         <ul className="mt-3 flex flex-col gap-2">
-          {msg.cards.map((c) => (
-            <li key={c.cardId} className="rounded-md border border-border bg-background p-3">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="text-xs font-medium text-muted-foreground">
-                    {c.clauseNo ? `§${c.clauseNo} ` : ''}
-                    {c.clauseTitle ?? ''}
-                  </p>
-                  <p className="mt-1 whitespace-pre-wrap text-sm">{c.requirementText}</p>
-                </div>
-                <div className="flex shrink-0 flex-col items-end gap-2 text-[11px] text-muted-foreground">
-                  {c.page !== undefined && <span>第 {c.page} 页</span>}
+          {msg.cards.map((c) => {
+            // 技术规范标准：所属 section / 标准；退回 clause。
+            const standardLabel =
+              c.standard?.sectionNo || c.standard?.sectionTitle
+                ? `${c.standard.sectionNo ? `§${c.standard.sectionNo} ` : ''}${c.standard.sectionTitle ?? ''}`.trim()
+                : c.clauseNo
+                  ? `§${c.clauseNo} ${c.clauseTitle ?? ''}`.trim()
+                  : (c.standard?.standardTitle ?? '标准');
+            const citations = c.citations ?? [];
+            return (
+              <li key={c.cardId} className="rounded-md border border-border bg-background p-3">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium text-foreground">{standardLabel}</p>
+                    <p className="mt-1 whitespace-pre-wrap text-sm">{c.requirementText}</p>
+                  </div>
                   <Button
                     size="sm"
                     variant="secondary"
+                    className="shrink-0"
                     onClick={() => void window.nb.system.openSource({ sourceId: c.sourceId })}
                   >
-                    在系统中打开 PDF
+                    打开 PDF
                   </Button>
                 </div>
-              </div>
-            </li>
-          ))}
+
+                {/* 引用地址：页码 + 原文摘录 */}
+                {citations.length > 0 && (
+                  <div className="mt-2 flex flex-col gap-1 border-t border-border pt-2">
+                    {citations.slice(0, 3).map((cit) => (
+                      <div key={cit.citationId} className="text-[11px] text-muted-foreground">
+                        <span className="mr-1 rounded bg-muted px-1.5 py-0.5 font-mono">
+                          {cit.page !== undefined ? `p${cit.page}` : '—'}
+                        </span>
+                        <span className="italic">“{cit.quote.slice(0, 160)}”</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {c.referencedStandards && c.referencedStandards.length > 0 && (
+                  <div className="mt-2 flex flex-wrap items-center gap-1">
+                    <span className="text-[10px] text-muted-foreground">引用标准：</span>
+                    {c.referencedStandards.slice(0, 6).map((code) => (
+                      <span
+                        key={code}
+                        className="rounded bg-muted px-1.5 py-0.5 text-[10px] text-foreground"
+                      >
+                        {code}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

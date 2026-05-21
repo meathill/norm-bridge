@@ -1,9 +1,11 @@
 import { newId } from '@shared/ids';
 import type {
+  SearchCitation,
   SearchExpansion,
   SearchQueryInput,
   SearchQueryResult,
   SearchResultCard,
+  SearchStandardRef,
 } from '@shared/domain/search';
 import type { SearchRunner } from '@agents/search-runner';
 import type { ProjectSession } from './project-session';
@@ -15,6 +17,7 @@ type RequirementRow = {
   id: string;
   standard_id: string;
   source_id: string;
+  standard_title: string | null;
   requirement_text: string;
   clause_id: string | null;
   clause_no: string | null;
@@ -28,6 +31,14 @@ type CitationsForRequirementRow = {
   requirement_id: string;
   citation_id: string;
   page: number | null;
+  quote: string;
+};
+
+type ClauseRow = {
+  id: string;
+  parent_clause_id: string | null;
+  clause_no: string | null;
+  title: string | null;
 };
 
 export class SearchService {
@@ -98,6 +109,23 @@ export class SearchService {
     const cards: SearchResultCard[] = scored.map(({ row, score }) => {
       const citsForReq = citations.get(row.id) ?? [];
       const firstCit = citsForReq[0];
+      const citationDetails: SearchCitation[] = citsForReq.map((c) => ({
+        citationId: c.citation_id,
+        ...(c.page !== null ? { page: c.page } : {}),
+        quote: c.quote,
+      }));
+
+      const section = row.clause_id ? this.resolveSection(row.clause_id) : null;
+      const standard: SearchStandardRef = {
+        standardId: row.standard_id,
+        ...(row.standard_title ? { standardTitle: row.standard_title } : {}),
+        ...(section?.clause_no ? { sectionNo: section.clause_no } : {}),
+        ...(section?.title ? { sectionTitle: section.title } : {}),
+      };
+      const referencedStandards = section
+        ? this.referencedStandardsForClause(section.id, row.standard_id)
+        : [];
+
       const card: SearchResultCard = {
         cardId: newId('matchResult'),
         sourceId: row.source_id,
@@ -105,6 +133,9 @@ export class SearchService {
         requirementId: row.id,
         requirementText: row.requirement_text,
         citationIds: citsForReq.map((c) => c.citation_id),
+        citations: citationDetails,
+        standard,
+        referencedStandards,
         score,
       };
       if (row.clause_id) card.clauseId = row.clause_id;
@@ -117,10 +148,40 @@ export class SearchService {
     return cards;
   }
 
+  /** Walk a clause up to its top-level ancestor (the section / standard the hit belongs to). */
+  private resolveSection(clauseId: string): ClauseRow | null {
+    const stmt = this.sqlite.prepare(
+      'SELECT id, parent_clause_id, clause_no, title FROM clauses WHERE id = ?',
+    );
+    let current = stmt.get(clauseId) as ClauseRow | undefined;
+    if (!current) return null;
+    const seen = new Set<string>();
+    while (current.parent_clause_id && !seen.has(current.id)) {
+      seen.add(current.id);
+      const parent = stmt.get(current.parent_clause_id) as ClauseRow | undefined;
+      if (!parent) break;
+      current = parent;
+    }
+    return current;
+  }
+
+  /** External standards referenced from a section's clause subtree. */
+  private referencedStandardsForClause(_sectionClauseId: string, standardId: string): string[] {
+    const rows = this.sqlite
+      .prepare(
+        `SELECT DISTINCT referenced_standard_code
+         FROM standard_references
+         WHERE from_standard_id = ?
+         LIMIT 20`,
+      )
+      .all(standardId) as Array<{ referenced_standard_code: string }>;
+    return rows.map((r) => r.referenced_standard_code);
+  }
+
   private fetchRequirementRows(sourceId: string | undefined): RequirementRow[] {
     const where = sourceId ? 'WHERE s.source_id = ?' : '';
     const stmt = this.sqlite.prepare(
-      `SELECT r.id, r.standard_id, s.source_id, r.requirement_text,
+      `SELECT r.id, r.standard_id, s.source_id, s.title as standard_title, r.requirement_text,
               r.clause_id, c.clause_no, c.title as clause_title, c.raw_text as clause_raw_text,
               NULL as citation_id, NULL as page
        FROM requirements r
@@ -143,7 +204,7 @@ export class SearchService {
       const chunk = requirementIds.slice(i, i + chunkSize);
       const placeholders = chunk.map(() => '?').join(',');
       const stmt = this.sqlite.prepare(
-        `SELECT rc.requirement_id, rc.citation_id, cit.page
+        `SELECT rc.requirement_id, rc.citation_id, cit.page, cit.quote
          FROM requirement_citations rc
          JOIN citations cit ON rc.citation_id = cit.id
          WHERE rc.requirement_id IN (${placeholders})

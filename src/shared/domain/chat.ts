@@ -1,4 +1,5 @@
 import type { DocumentInspection } from './inspection';
+import type { SearchResultCard } from './search';
 import type { SourceFile } from './source';
 
 /** Each variant carries enough state for the renderer to render and update it. */
@@ -51,15 +52,8 @@ export type ChatJobMessage = ChatMessageBase & {
   sourceId: string;
 };
 
-export type ChatSearchResultCard = {
-  cardId: string;
-  clauseNo?: string;
-  clauseTitle?: string;
-  requirementText: string;
-  page?: number;
-  sourceId: string;
-  citationIds: string[];
-};
+/** The chat renders the full search card (standard ref + citation addresses). */
+export type ChatSearchResultCard = SearchResultCard;
 
 export type ChatSearchResultMessage = ChatMessageBase & {
   type: 'search-result';

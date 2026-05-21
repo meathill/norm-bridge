@@ -12,6 +12,23 @@ export type SearchExpansion = {
   parameters?: Record<string, string>;
 };
 
+/** One concrete citation address: where in the source this text comes from. */
+export type SearchCitation = {
+  citationId: string;
+  page?: number;
+  /** Verbatim quote from the source (the "引用原文"). */
+  quote: string;
+};
+
+/** The standard/section a hit belongs to (the "技术规范标准"). */
+export type SearchStandardRef = {
+  standardId: string;
+  standardTitle?: string;
+  /** Top-level section the requirement lives under, e.g. "01 74 19 Waste Management". */
+  sectionNo?: string;
+  sectionTitle?: string;
+};
+
 export type SearchResultCard = {
   cardId: string;
   sourceId: string;
@@ -23,6 +40,12 @@ export type SearchResultCard = {
   requirementText: string;
   page?: number;
   citationIds: string[];
+  /** Citation addresses (page + verbatim quote) backing this hit. */
+  citations: SearchCitation[];
+  /** The standard / section this requirement belongs to. */
+  standard: SearchStandardRef;
+  /** External standards (ISO/IEC/EN…) the owning section references, if any. */
+  referencedStandards: string[];
   /** Match score from the SQLite retriever (higher = better). */
   score: number;
 };

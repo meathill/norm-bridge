@@ -123,6 +123,19 @@ describe('SearchService (mock runner + LIKE retriever)', () => {
     expect(top?.requirementText.toLowerCase()).toContain('shall');
   });
 
+  it('returns the citation address (page + verbatim quote) for each hit', async () => {
+    const result = await searchService.query({ text: 'breaker shall trip 1A' });
+    const top = result.cards[0];
+    expect(top).toBeDefined();
+    // 引用地址：每条命中都带至少一个原文引用
+    expect(top!.citations.length).toBeGreaterThan(0);
+    const cit = top!.citations[0]!;
+    expect(typeof cit.quote).toBe('string');
+    expect(cit.quote.length).toBeGreaterThan(0);
+    // 技术规范标准：所属标准信息
+    expect(top!.standard.standardId).toBe(top!.standardId);
+  });
+
   it('returns no cards when no token matches', async () => {
     const result = await searchService.query({ text: 'xyz unrelated' });
     expect(result.cards).toHaveLength(0);
