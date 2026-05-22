@@ -24,9 +24,14 @@ export type RuntimeAgentConfig = {
   compileModel: string;
   searchModel: string;
   apiStyle: ApiStyle;
+  requestTimeoutMs: number;
+  maxRetries: number;
 };
 
 const DEFAULT_MODEL = 'gpt-4.1-mini';
+/** Per-request timeout. A hung third-party endpoint should fail loudly, not freeze the UI. */
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_RETRIES = 1;
 /** Default to chat completions because most OpenAI-compatible third-party providers
  * (DeepSeek, 通义千问, OpenRouter, Xiaomi MiMo, vLLM, …) only implement that endpoint
  * and return 404 for /v1/responses. OpenAI users can opt in with OPENAI_API_STYLE=responses. */
@@ -56,8 +61,17 @@ export function configureOpenAiRuntime(): RuntimeAgentConfig {
   const compileModel = (process.env['NORMBRIDGE_COMPILE_MODEL'] ?? '').trim() || defaultModel;
   const searchModel = (process.env['NORMBRIDGE_SEARCH_MODEL'] ?? '').trim() || defaultModel;
   const apiStyle = parseApiStyle(process.env['OPENAI_API_STYLE']);
+  const requestTimeoutMs = parsePositiveInt(
+    process.env['NORMBRIDGE_REQUEST_TIMEOUT_MS'],
+    DEFAULT_REQUEST_TIMEOUT_MS,
+  );
+  const maxRetries = parsePositiveInt(process.env['NORMBRIDGE_MAX_RETRIES'], DEFAULT_MAX_RETRIES);
 
-  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = { apiKey };
+  const clientOptions: ConstructorParameters<typeof OpenAI>[0] = {
+    apiKey,
+    timeout: requestTimeoutMs,
+    maxRetries,
+  };
   if (baseURL) clientOptions.baseURL = baseURL;
   const client = new OpenAI(clientOptions);
 
@@ -67,9 +81,22 @@ export function configureOpenAiRuntime(): RuntimeAgentConfig {
   // TECH_SPEC §18 — never ship prompts to the OpenAI dashboard by default.
   setTracingDisabled(true);
 
-  const config: RuntimeAgentConfig = { apiKey, baseURL, compileModel, searchModel, apiStyle };
+  const config: RuntimeAgentConfig = {
+    apiKey,
+    baseURL,
+    compileModel,
+    searchModel,
+    apiStyle,
+    requestTimeoutMs,
+    maxRetries,
+  };
   cached = config;
   return config;
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt((raw ?? '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function parseApiStyle(raw: string | undefined): ApiStyle {

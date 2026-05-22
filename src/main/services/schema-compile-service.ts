@@ -268,6 +268,12 @@ export class SchemaCompileService {
         requirements: RequirementExtractorOutput;
         references: ReferenceResolverOutput;
       };
+      // Each section runs 3 sequential LLM calls (clauses → requirements → references).
+      // Map their per-stage progress onto the overall bar so the UI shows movement
+      // instead of appearing frozen during a slow call.
+      const sectionBase = 0.1 + (i / units.length) * 0.75;
+      const sectionSpan = (1 / units.length) * 0.75;
+      const stageOffset = { clauses: 0, requirements: 1 / 3, references: 2 / 3 } as const;
       try {
         raw = await args.runner.compile(
           {
@@ -280,6 +286,10 @@ export class SchemaCompileService {
           },
           {
             onLog: (level, message) => handle.emitLog(level, `[${runner.id}] ${message}`),
+            onProgress: async (stage, ratio) => {
+              const within = stageOffset[stage] + ratio * (1 / 3);
+              await handle.emitProgress(sectionBase + within * sectionSpan, `${label} · ${stage}`);
+            },
           },
         );
       } catch (err) {
