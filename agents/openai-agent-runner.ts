@@ -1,4 +1,5 @@
 import { Agent, run } from '@openai/agents';
+import type { z } from 'zod';
 import {
   clauseCompilerOutputSchema,
   referenceResolverOutputSchema,
@@ -16,34 +17,39 @@ import type {
 } from './agent-runner';
 import { configureOpenAiRuntime } from './runtime-config';
 
-const CLAUSE_INSTRUCTIONS = `You compile a technical-standard PDF into a clause tree.
-The user message contains text blocks tagged by page and block id. Detect headings of the form
-"N", "N.N", "N.N.N" with a short title, and group surrounding paragraphs as the clause body.
-Set parentLocalId by trimming the trailing segment of clauseNo. Use the block ids you grounded
-each clause in as citationAnchors.textBlockIds. NEVER invent a quote that does not appear verbatim
-in the input. Confidence is your subjective certainty (0..1).`;
+// We do NOT use the SDK's structured-output (`outputType`) because third-party
+// OpenAI-compatible endpoints (Xiaomi MiMo, DeepSeek, vLLM, …) mishandle strict
+// json_schema, producing output the SDK then rejects. Instead each agent is a
+// plain chat agent that we instruct to emit JSON; we extract + leniently parse
+// it ourselves, which is far more compatible and lets us log the raw output.
 
-const REQUIREMENT_INSTRUCTIONS = `You extract mandatory requirements from a technical standard.
-You receive (a) the clause tree produced earlier and (b) the original text blocks. For each
-sentence that uses a modal verb (shall, shall not, must, must not), emit one requirement.
-Cite the block ids you read it from. Map it to the most specific clause that owns the page.
-Set localClauseId to the clauseLocalId from the clause tree. severity is "mandatory" for shall/must
-sentences, "recommended" for "should", "informational" otherwise. NEVER invent quotes.`;
+const JSON_RULES = `Output ONLY a single JSON object, no markdown fences, no prose before or after.
+Quotes must be copied verbatim from the input text. Never invent content.`;
 
-const REFERENCE_INSTRUCTIONS = `You identify other standards referenced from this PDF.
-Look for codes like "IEC 60898-1:2015", "GB/T 14048", "ISO 80000-1", and so on. For each, output
-its standard code, the citing clause if obvious, an optional referenced clause, and a relationType:
-- normative: appears in a Normative References clause
-- informative: appears in a Bibliography
-- equivalent / adopted / replaces / replaced_by: only if the source text says so explicitly
-- unknown: when the relationship is not stated
-Cite the block ids you read each from. NEVER invent quotes.`;
+const CLAUSE_INSTRUCTIONS = `You compile a technical-standard PDF section into a clause tree.
+The user message contains text blocks tagged by page, e.g. "<page 12>\\n  [id] text".
+Detect headings ("N", "N.N", "01 74 19", "SECTION xx") and group the paragraphs under them.
+${JSON_RULES}
+JSON shape:
+{"clauses":[{"localId":"c1","parentLocalId":null,"clauseNo":"1.2","title":"...","pageStart":12,"pageEnd":13,"confidence":0.7,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
+- localId: any unique string you choose; parentLocalId: localId of the parent clause or null.
+- citationAnchors: 1+ short verbatim quotes (10-200 chars) with their page.`;
 
-/**
- * Default cap for blocks shipped in a single LLM call. v0.1 doesn't chunk yet,
- * so a 957-page PDF with ~70 blocks/page (≈ 67k blocks) gets aggressively
- * truncated. 2000 blocks ≈ 25-40 pages. Override via NORMBRIDGE_MAX_BLOCKS_PER_PROMPT.
- */
+const REQUIREMENT_INSTRUCTIONS = `You extract mandatory requirements from a technical standard section.
+For each sentence using a modal verb (shall, shall not, must, must not, is required to), emit one requirement.
+${JSON_RULES}
+JSON shape:
+{"requirements":[{"localClauseId":"c1","requirementText":"The contractor shall ...","severity":"mandatory","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
+- localClauseId: the clause localId from the provided clause tree that owns this requirement (optional).
+- severity: "mandatory" for shall/must, "recommended" for should, else "informational".`;
+
+const REFERENCE_INSTRUCTIONS = `You identify other standards referenced from this section.
+Look for codes like "IEC 60898-1:2015", "GB/T 14048", "ISO 19650", "ASTM C150", "EN 1991".
+${JSON_RULES}
+JSON shape:
+{"references":[{"referencedStandardCode":"ISO 19650-1","relationType":"normative","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
+- relationType: normative | informative | equivalent | adopted | replaces | replaced_by | unknown.`;
+
 const DEFAULT_MAX_PROMPT_BLOCKS = 2000;
 
 function envMaxBlocks(): number | null {
@@ -55,7 +61,6 @@ function envMaxBlocks(): number | null {
 }
 
 export type OpenAiRunnerOptions = {
-  /** Override model for this runner only; otherwise reads NORMBRIDGE_COMPILE_MODEL / NORMBRIDGE_AGENT_MODEL. */
   model?: string;
   maxBlocksPerPrompt?: number;
 };
@@ -110,93 +115,127 @@ export class OpenAiAgentRunner implements AgentRunner {
     if (estTokens > 24000) {
       await log(
         'warn',
-        `prompt 估算 ~${estTokens} tokens，较大，可能超出模型上下文或导致超时。可调小 ` +
-          `NORMBRIDGE_MAX_BLOCKS_PER_PROMPT，或调大 NORMBRIDGE_REQUEST_TIMEOUT_MS。`,
+        `prompt 估算 ~${estTokens} tokens，较大，可能超出模型上下文。可调小 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT。`,
       );
     }
 
     const header = standardHeader(ctx);
 
-    const clauses = await this.runStage<ClauseCompilerOutput>({
+    const clauses = await this.runStage({
       stage: 'clauses',
       log,
       onProgress: callbacks?.onProgress,
-      agent: () =>
-        new Agent({
-          name: 'ClauseCompiler',
-          instructions: CLAUSE_INSTRUCTIONS,
-          model,
-          outputType: clauseCompilerOutputSchema,
-        }),
+      model,
+      instructions: CLAUSE_INSTRUCTIONS,
       content: `${header}\n\n${text}`,
+      schema: clauseCompilerOutputSchema,
       describe: (o) => `${o.clauses.length} 条款`,
     });
 
-    const requirements = await this.runStage<RequirementExtractorOutput>({
+    const requirements = await this.runStage({
       stage: 'requirements',
       log,
       onProgress: callbacks?.onProgress,
-      agent: () =>
-        new Agent({
-          name: 'RequirementExtractor',
-          instructions: REQUIREMENT_INSTRUCTIONS,
-          model,
-          outputType: requirementExtractorOutputSchema,
-        }),
-      content: `${header}\n\nClause tree:\n${JSON.stringify(clauses.clauses, null, 2)}\n\nText blocks:\n${text}`,
+      model,
+      instructions: REQUIREMENT_INSTRUCTIONS,
+      content: `${header}\n\nClause tree:\n${JSON.stringify(
+        clauses.clauses.map((c) => ({ localId: c.localId, clauseNo: c.clauseNo, title: c.title })),
+      )}\n\nText blocks:\n${text}`,
+      schema: requirementExtractorOutputSchema,
       describe: (o) => `${o.requirements.length} 个 requirement`,
     });
 
-    const references = await this.runStage<ReferenceResolverOutput>({
+    const references = await this.runStage({
       stage: 'references',
       log,
       onProgress: callbacks?.onProgress,
-      agent: () =>
-        new Agent({
-          name: 'ReferenceResolver',
-          instructions: REFERENCE_INSTRUCTIONS,
-          model,
-          outputType: referenceResolverOutputSchema,
-        }),
+      model,
+      instructions: REFERENCE_INSTRUCTIONS,
       content: `${header}\n\n${text}`,
+      schema: referenceResolverOutputSchema,
       describe: (o) => `${o.references.length} 个引用标准`,
     });
 
     return { clauses, requirements, references };
   }
 
-  private async runStage<T>(args: {
+  private async runStage<S extends z.ZodTypeAny>(args: {
     stage: 'clauses' | 'requirements' | 'references';
     log: (level: 'info' | 'warn' | 'error', message: string) => Promise<void> | void;
     onProgress: AgentCompileCallbacks['onProgress'];
-    // biome-ignore lint/suspicious/noExplicitAny: the SDK's Agent output generic varies per stage.
-    agent: () => Agent<unknown, any>;
+    model: string;
+    instructions: string;
     content: string;
-    describe: (output: T) => string;
-  }): Promise<T> {
-    const { stage, log, onProgress, agent, content, describe } = args;
+    schema: S;
+    describe: (output: z.infer<S>) => string;
+  }): Promise<z.infer<S>> {
+    const { stage, log, onProgress, model, instructions, content, schema, describe } = args;
     await onProgress?.(stage, 0);
     await log('info', `[${stage}] 请求发出，等待响应…（content ≈ ${content.length} 字符）`);
     const t0 = Date.now();
+
+    const agent = new Agent({ name: `nb-${stage}`, instructions, model });
+    let rawText: string;
     try {
-      const result = await run(agent(), [{ role: 'user', content }]);
-      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-      const out = result.finalOutput;
-      if (out === undefined || out === null) {
-        throw new Error(`stage ${stage} 返回空输出`);
-      }
-      await log('info', `[${stage}] ✓ ${elapsed}s · ${describe(out as T)}`);
-      await onProgress?.(stage, 1);
-      return out as T;
+      const result = await run(agent, [{ role: 'user', content }]);
+      rawText = typeof result.finalOutput === 'string' ? result.finalOutput : '';
     } catch (err) {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
       await log('error', `[${stage}] ✗ ${elapsed}s · ${describeError(err)}`);
       throw err;
     }
+
+    const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+    await log('info', `[${stage}] 响应到达 ${elapsed}s · ${rawText.length} 字符，开始解析…`);
+
+    const jsonText = extractJsonObject(rawText);
+    if (!jsonText) {
+      await log('error', `[${stage}] ✗ 响应里找不到 JSON。原始前 400 字：${rawText.slice(0, 400)}`);
+      throw new Error(`stage ${stage}: no JSON object in model output`);
+    }
+
+    let parsedJson: unknown;
+    try {
+      parsedJson = JSON.parse(jsonText);
+    } catch (err) {
+      await log(
+        'error',
+        `[${stage}] ✗ JSON.parse 失败：${(err as Error).message}。JSON 前 400 字：${jsonText.slice(0, 400)}`,
+      );
+      throw new Error(`stage ${stage}: invalid JSON`);
+    }
+
+    const result = schema.safeParse(parsedJson);
+    if (!result.success) {
+      const issues = result.error.issues
+        .slice(0, 5)
+        .map((i) => `${i.path.join('.')}: ${i.message}`)
+        .join('; ');
+      await log(
+        'error',
+        `[${stage}] ✗ schema 校验失败：${issues}。JSON 前 400 字：${jsonText.slice(0, 400)}`,
+      );
+      throw new Error(`stage ${stage}: schema validation failed (${issues})`);
+    }
+
+    await log('info', `[${stage}] ✓ ${elapsed}s · ${describe(result.data)}`);
+    await onProgress?.(stage, 1);
+    return result.data;
   }
 }
 
-/** Extract the useful bits from an OpenAI SDK error (status / code / body) for logging. */
+/** Pull the outermost JSON object out of a model response (handles ```json fences). */
+function extractJsonObject(text: string): string | null {
+  if (!text) return null;
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const body = fenced?.[1] ?? text;
+  const start = body.indexOf('{');
+  const end = body.lastIndexOf('}');
+  if (start === -1 || end === -1 || end <= start) return null;
+  return body.slice(start, end + 1);
+}
+
+/** Extract the useful bits from an OpenAI SDK / network error for logging. */
 function describeError(err: unknown): string {
   if (!err || typeof err !== 'object') return String(err);
   const e = err as {
@@ -205,7 +244,7 @@ function describeError(err: unknown): string {
     status?: number;
     code?: string | number;
     type?: string;
-    error?: { message?: string; type?: string; code?: string | number };
+    error?: { message?: string };
     cause?: { message?: string; code?: string };
   };
   const parts: string[] = [];

@@ -207,6 +207,7 @@ function ownerClauseFor(line: Line, clauses: ClauseCandidate[]): ClauseCandidate
   // The owning clause is the most recent clause whose pageStart..pageEnd covers this line.
   let best: ClauseCandidate | null = null;
   for (const c of clauses) {
+    if (c.pageStart === undefined || c.pageEnd === undefined) continue;
     if (c.pageStart <= line.page && line.page <= c.pageEnd) {
       best = c;
     }

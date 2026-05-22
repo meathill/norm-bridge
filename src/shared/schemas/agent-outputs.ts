@@ -1,34 +1,38 @@
 import { z } from 'zod';
 
 /**
- * What each skill is expected to return. Citations are referenced by the
- * text-block IDs the skill grounded its answer in; the SchemaCompileService
- * turns those anchors into Citation rows after validation.
+ * What each skill is expected to return. These are LENIENT on purpose: the LLM
+ * output is parsed by us (not the provider's strict json_schema enforcement),
+ * so we accept loose/partial shapes and normalize defaults in SchemaCompileService.
+ *
+ * Citation anchors only require a verbatim `quote`; `page` and `textBlockIds` are
+ * optional. The compiler resolves block ids by matching the quote against the
+ * page's text blocks, because models can't reliably echo back our internal ids.
  */
 
 const citationAnchorSchema = z.object({
-  page: z.number().int().positive(),
-  /** Indices into the per-page reading-order list, or text-block IDs. */
-  textBlockIds: z.array(z.string()).min(1),
-  /** Verbatim quote, copied from the source text blocks. */
+  page: z.coerce.number().int().positive().optional(),
+  /** Optional: internal text-block ids, if the model echoed them. */
+  textBlockIds: z.array(z.string()).optional(),
+  /** Verbatim quote, copied from the source text. */
   quote: z.string().min(1),
 });
 
 const clauseCandidateSchema = z.object({
   /** Local id within the output, used to wire up parent-child links. */
   localId: z.string().min(1),
-  parentLocalId: z.string().nullable(),
+  parentLocalId: z.string().nullish(),
   clauseNo: z.string().optional(),
   title: z.string().optional(),
-  pageStart: z.number().int().positive(),
-  pageEnd: z.number().int().positive(),
+  pageStart: z.coerce.number().int().positive().optional(),
+  pageEnd: z.coerce.number().int().positive().optional(),
   rawText: z.string().optional(),
-  confidence: z.number().min(0).max(1),
-  citationAnchors: z.array(citationAnchorSchema).min(1),
+  confidence: z.coerce.number().min(0).max(1).optional(),
+  citationAnchors: z.array(citationAnchorSchema).optional(),
 });
 
 const requirementCandidateSchema = z.object({
-  localClauseId: z.string().min(1),
+  localClauseId: z.string().optional(),
   subject: z.string().optional(),
   appliesTo: z.string().optional(),
   conditionText: z.string().optional(),
@@ -40,8 +44,8 @@ const requirementCandidateSchema = z.object({
   testMethod: z.string().optional(),
   evidenceRequired: z.string().optional(),
   severity: z.enum(['mandatory', 'recommended', 'informational']).optional(),
-  confidence: z.number().min(0).max(1),
-  citationAnchors: z.array(citationAnchorSchema).min(1),
+  confidence: z.coerce.number().min(0).max(1).optional(),
+  citationAnchors: z.array(citationAnchorSchema).optional(),
 });
 
 const referenceCandidateSchema = z.object({
@@ -59,20 +63,20 @@ const referenceCandidateSchema = z.object({
       'unknown',
     ])
     .optional(),
-  confidence: z.number().min(0).max(1),
-  citationAnchors: z.array(citationAnchorSchema).min(1),
+  confidence: z.coerce.number().min(0).max(1).optional(),
+  citationAnchors: z.array(citationAnchorSchema).optional(),
 });
 
 export const clauseCompilerOutputSchema = z.object({
-  clauses: z.array(clauseCandidateSchema),
+  clauses: z.array(clauseCandidateSchema).default([]),
 });
 
 export const requirementExtractorOutputSchema = z.object({
-  requirements: z.array(requirementCandidateSchema),
+  requirements: z.array(requirementCandidateSchema).default([]),
 });
 
 export const referenceResolverOutputSchema = z.object({
-  references: z.array(referenceCandidateSchema),
+  references: z.array(referenceCandidateSchema).default([]),
 });
 
 export {

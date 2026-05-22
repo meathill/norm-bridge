@@ -205,6 +205,12 @@ export class SchemaCompileService {
     sectionMap: SectionMap;
   }): Promise<BuiltSchema> {
     const { handle, runner, source, pages, textBlocks, blockIndex, sectionMap } = args;
+    const blocksByPage = new Map<number, PdfTextBlock[]>();
+    for (const b of textBlocks) {
+      const list = blocksByPage.get(b.page) ?? [];
+      list.push(b);
+      blocksByPage.set(b.page, list);
+    }
     const now = new Date().toISOString();
     const standardId = newId('standard');
     const standard: StandardRecord = {
@@ -321,6 +327,7 @@ export class SchemaCompileService {
         section: useSections ? section : null,
         source,
         blockIndex,
+        blocksByPage,
         clauseOut: clausesOut.data,
         requirementOut: requirementsOut.data,
         referenceOut: referencesOut.data,
@@ -360,6 +367,7 @@ export class SchemaCompileService {
     section: SectionEntry | null;
     source: SourceFile;
     blockIndex: Map<string, PdfTextBlock>;
+    blocksByPage: Map<number, PdfTextBlock[]>;
     clauseOut: ClauseCompilerOutput;
     requirementOut: RequirementExtractorOutput;
     referenceOut: ReferenceResolverOutput;
@@ -375,11 +383,15 @@ export class SchemaCompileService {
       section,
       source,
       blockIndex,
+      blocksByPage,
       clauseOut,
       requirementOut,
       referenceOut,
       out,
     } = args;
+    const fallbackPage = section?.pageStart;
+    const resolve = (anchors: CitationAnchor[] | undefined) =>
+      anchorsToCitations(anchors, source, blockIndex, blocksByPage, fallbackPage, out.citations);
 
     let rootClauseId: string | null = null;
     if (section) {
@@ -407,22 +419,27 @@ export class SchemaCompileService {
       const parentId = c.parentLocalId
         ? (localToClauseId.get(c.parentLocalId) ?? rootClauseId)
         : rootClauseId;
+      const pageStart = c.pageStart ?? section?.pageStart;
+      const pageEnd = c.pageEnd ?? section?.pageEnd;
       out.clauses.push({
         id,
         standardId,
         parentClauseId: parentId,
         ...(c.clauseNo ? { clauseNo: c.clauseNo } : {}),
         ...(c.title ? { title: c.title } : {}),
-        pageStart: c.pageStart,
-        pageEnd: c.pageEnd,
+        ...(pageStart !== undefined ? { pageStart } : {}),
+        ...(pageEnd !== undefined ? { pageEnd } : {}),
         ...(c.rawText ? { rawText: c.rawText } : {}),
         reviewStatus: 'unreviewed',
       });
     }
 
     for (const r of requirementOut.requirements) {
-      const citationIds = anchorsToCitations(r.citationAnchors, source, blockIndex, out.citations);
-      const clauseId = localToClauseId.get(r.localClauseId) ?? rootClauseId ?? undefined;
+      const citationIds = resolve(r.citationAnchors);
+      const clauseId =
+        (r.localClauseId ? localToClauseId.get(r.localClauseId) : undefined) ??
+        rootClauseId ??
+        undefined;
       out.requirements.push({
         id: newId('requirement'),
         standardId,
@@ -438,19 +455,14 @@ export class SchemaCompileService {
         ...(r.testMethod ? { testMethod: r.testMethod } : {}),
         ...(r.evidenceRequired ? { evidenceRequired: r.evidenceRequired } : {}),
         ...(r.severity ? { severity: r.severity } : {}),
-        confidence: r.confidence,
+        confidence: r.confidence ?? 0.5,
         citationIds,
         reviewStatus: citationIds.length === 0 ? 'needs_review' : 'unreviewed',
       });
     }
 
     for (const ref of referenceOut.references) {
-      const citationIds = anchorsToCitations(
-        ref.citationAnchors,
-        source,
-        blockIndex,
-        out.citations,
-      );
+      const citationIds = resolve(ref.citationAnchors);
       const fromClauseId = ref.fromLocalClauseId
         ? (localToClauseId.get(ref.fromLocalClauseId) ?? rootClauseId ?? undefined)
         : (rootClauseId ?? undefined);
@@ -643,34 +655,62 @@ function syntheticWholeDocSection(_standardId: string, pages: PdfPageInfo[]): Se
   };
 }
 
+function normalizeForMatch(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Build citation rows from anchors. Models give us a verbatim `quote` + maybe a
+ * `page`; they can't reliably echo our internal block ids, so we resolve blocks
+ * by matching the quote against the page's text. The citation address (page +
+ * quote) is always kept even when no block matches (bbox just stays absent).
+ */
 function anchorsToCitations(
-  anchors: CitationAnchor[],
+  anchors: CitationAnchor[] | undefined,
   source: SourceFile,
   blockIndex: Map<string, PdfTextBlock>,
+  blocksByPage: Map<number, PdfTextBlock[]>,
+  fallbackPage: number | undefined,
   out: CitationRecord[],
 ): string[] {
+  if (!anchors || anchors.length === 0) return [];
   const ids: string[] = [];
   for (const a of anchors) {
-    const blocks = a.textBlockIds.map((id) => blockIndex.get(id)).filter(Boolean) as PdfTextBlock[];
-    if (blocks.length === 0) continue;
-    const xs = blocks.map((b) => b.bbox.x);
-    const ys = blocks.map((b) => b.bbox.y);
-    const xsEnd = blocks.map((b) => b.bbox.x + b.bbox.w);
-    const ysEnd = blocks.map((b) => b.bbox.y + b.bbox.h);
-    const bbox: [number, number, number, number] = [
-      Math.min(...xs),
-      Math.min(...ys),
-      Math.max(...xsEnd) - Math.min(...xs),
-      Math.max(...ysEnd) - Math.min(...ys),
-    ];
+    const page = a.page ?? fallbackPage;
+
+    // 1. explicit block ids (mock / future), else 2. quote-match on the page.
+    let blocks: PdfTextBlock[] = [];
+    if (a.textBlockIds && a.textBlockIds.length > 0) {
+      blocks = a.textBlockIds.map((id) => blockIndex.get(id)).filter(Boolean) as PdfTextBlock[];
+    } else if (page !== undefined) {
+      const quoteNorm = normalizeForMatch(a.quote);
+      blocks = (blocksByPage.get(page) ?? [])
+        .filter((b) => {
+          const t = normalizeForMatch(b.text);
+          return t.length >= 3 && (quoteNorm.includes(t) || t.includes(quoteNorm));
+        })
+        .slice(0, 12);
+    }
+
     const cit: CitationRecord = {
       id: newId('citation'),
       sourceId: source.id,
       sourceHash: source.sha256,
-      page: a.page,
-      bbox,
+      ...(page !== undefined ? { page } : {}),
       quote: a.quote,
     };
+    if (blocks.length > 0) {
+      const xs = blocks.map((b) => b.bbox.x);
+      const ys = blocks.map((b) => b.bbox.y);
+      const xsEnd = blocks.map((b) => b.bbox.x + b.bbox.w);
+      const ysEnd = blocks.map((b) => b.bbox.y + b.bbox.h);
+      cit.bbox = [
+        Math.min(...xs),
+        Math.min(...ys),
+        Math.max(...xsEnd) - Math.min(...xs),
+        Math.max(...ysEnd) - Math.min(...ys),
+      ];
+    }
     out.push(cit);
     ids.push(cit.id);
   }
