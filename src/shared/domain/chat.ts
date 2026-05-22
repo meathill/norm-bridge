@@ -13,6 +13,8 @@ export type ChatSystemMessage = ChatMessageBase & {
   type: 'system';
   variant?: 'info' | 'success' | 'warning' | 'error';
   text: string;
+  /** Render compact (monospace, muted) — used for operational log lines. */
+  dense?: boolean;
 };
 
 export type ChatUserTextMessage = ChatMessageBase & {

@@ -42,8 +42,7 @@ Cite the block ids you read each from. NEVER invent quotes.`;
 /**
  * Default cap for blocks shipped in a single LLM call. v0.1 doesn't chunk yet,
  * so a 957-page PDF with ~70 blocks/page (≈ 67k blocks) gets aggressively
- * truncated. 2000 blocks ≈ 25-40 pages, which fits comfortably inside any
- * mainstream 32k-context model. Override via NORMBRIDGE_MAX_BLOCKS_PER_PROMPT.
+ * truncated. 2000 blocks ≈ 25-40 pages. Override via NORMBRIDGE_MAX_BLOCKS_PER_PROMPT.
  */
 const DEFAULT_MAX_PROMPT_BLOCKS = 2000;
 
@@ -81,84 +80,144 @@ export class OpenAiAgentRunner implements AgentRunner {
     ctx: AgentCompileContext,
     callbacks?: AgentCompileCallbacks,
   ): Promise<AgentCompileResult> {
-    // Eager check: surface the missing-config error before we spend any time on the input.
     const cfg = configureOpenAiRuntime();
     const model = this.explicitModel ?? cfg.compileModel;
-
     const cap = this.maxBlocks;
+    const usedBlocks = Math.min(cap, ctx.textBlocks.length);
     const text = blocksToPromptText(ctx.textBlocks, cap);
-    await callbacks?.onLog?.(
+    const promptChars = text.length;
+    const estTokens = Math.round(promptChars / 4);
+
+    const log = (level: 'info' | 'warn' | 'error', message: string) =>
+      callbacks?.onLog?.(level, message);
+
+    await log(
       'info',
-      `openai-agent-runner: model=${model}, baseURL=${cfg.baseURL ?? '(default)'}, api=${cfg.apiStyle}`,
+      `LLM 编译开始 · model=${model} · endpoint=${cfg.baseURL ?? 'OpenAI 默认'} · ` +
+        `api=${cfg.apiStyle} · timeout=${Math.round(cfg.requestTimeoutMs / 1000)}s · retries=${cfg.maxRetries}`,
+    );
+    await log(
+      'info',
+      `输入 · 文本块 ${usedBlocks}/${ctx.textBlocks.length} · prompt ≈ ${promptChars} 字符 / ~${estTokens} tokens · 页 ${ctx.pages[0]?.page ?? '?'}–${ctx.pages[ctx.pages.length - 1]?.page ?? '?'}`,
     );
     if (ctx.textBlocks.length > cap) {
-      await callbacks?.onLog?.(
+      await log(
         'warn',
-        `输入文本块 ${ctx.textBlocks.length} 个超过单次上限 ${cap}，已截断处理前 ${cap} 个。` +
-          `如需处理全部内容，请提高 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT 或等后续分片支持。`,
+        `文本块 ${ctx.textBlocks.length} 超过单次上限 ${cap}，已截断处理前 ${cap} 个。` +
+          `调 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT 处理更多。`,
+      );
+    }
+    if (estTokens > 24000) {
+      await log(
+        'warn',
+        `prompt 估算 ~${estTokens} tokens，较大，可能超出模型上下文或导致超时。可调小 ` +
+          `NORMBRIDGE_MAX_BLOCKS_PER_PROMPT，或调大 NORMBRIDGE_REQUEST_TIMEOUT_MS。`,
       );
     }
 
-    const clauseAgent = new Agent({
-      name: 'ClauseCompiler',
-      instructions: CLAUSE_INSTRUCTIONS,
-      model,
-      outputType: clauseCompilerOutputSchema,
-    });
-    await callbacks?.onProgress?.('clauses', 0);
-    const clauseRun = await run(clauseAgent, [
-      { role: 'user', content: `${standardHeader(ctx)}\n\n${text}` },
-    ]);
-    const clauses = ensureOutput<ClauseCompilerOutput>(clauseRun.finalOutput, 'clauses');
-    await callbacks?.onProgress?.('clauses', 1);
-    await callbacks?.onLog?.('info', `openai: ${clauses.clauses.length} clauses`);
+    const header = standardHeader(ctx);
 
-    const requirementAgent = new Agent({
-      name: 'RequirementExtractor',
-      instructions: REQUIREMENT_INSTRUCTIONS,
-      model,
-      outputType: requirementExtractorOutputSchema,
+    const clauses = await this.runStage<ClauseCompilerOutput>({
+      stage: 'clauses',
+      log,
+      onProgress: callbacks?.onProgress,
+      agent: () =>
+        new Agent({
+          name: 'ClauseCompiler',
+          instructions: CLAUSE_INSTRUCTIONS,
+          model,
+          outputType: clauseCompilerOutputSchema,
+        }),
+      content: `${header}\n\n${text}`,
+      describe: (o) => `${o.clauses.length} 条款`,
     });
-    await callbacks?.onProgress?.('requirements', 0);
-    const requirementRun = await run(requirementAgent, [
-      {
-        role: 'user',
-        content: `${standardHeader(ctx)}\n\nClause tree:\n${JSON.stringify(clauses.clauses, null, 2)}\n\nText blocks:\n${text}`,
-      },
-    ]);
-    const requirements = ensureOutput<RequirementExtractorOutput>(
-      requirementRun.finalOutput,
-      'requirements',
-    );
-    await callbacks?.onProgress?.('requirements', 1);
-    await callbacks?.onLog?.('info', `openai: ${requirements.requirements.length} requirements`);
 
-    const referenceAgent = new Agent({
-      name: 'ReferenceResolver',
-      instructions: REFERENCE_INSTRUCTIONS,
-      model,
-      outputType: referenceResolverOutputSchema,
+    const requirements = await this.runStage<RequirementExtractorOutput>({
+      stage: 'requirements',
+      log,
+      onProgress: callbacks?.onProgress,
+      agent: () =>
+        new Agent({
+          name: 'RequirementExtractor',
+          instructions: REQUIREMENT_INSTRUCTIONS,
+          model,
+          outputType: requirementExtractorOutputSchema,
+        }),
+      content: `${header}\n\nClause tree:\n${JSON.stringify(clauses.clauses, null, 2)}\n\nText blocks:\n${text}`,
+      describe: (o) => `${o.requirements.length} 个 requirement`,
     });
-    await callbacks?.onProgress?.('references', 0);
-    const referenceRun = await run(referenceAgent, [
-      { role: 'user', content: `${standardHeader(ctx)}\n\n${text}` },
-    ]);
-    const references = ensureOutput<ReferenceResolverOutput>(
-      referenceRun.finalOutput,
-      'references',
-    );
-    await callbacks?.onProgress?.('references', 1);
-    await callbacks?.onLog?.('info', `openai: ${references.references.length} references`);
+
+    const references = await this.runStage<ReferenceResolverOutput>({
+      stage: 'references',
+      log,
+      onProgress: callbacks?.onProgress,
+      agent: () =>
+        new Agent({
+          name: 'ReferenceResolver',
+          instructions: REFERENCE_INSTRUCTIONS,
+          model,
+          outputType: referenceResolverOutputSchema,
+        }),
+      content: `${header}\n\n${text}`,
+      describe: (o) => `${o.references.length} 个引用标准`,
+    });
 
     return { clauses, requirements, references };
   }
+
+  private async runStage<T>(args: {
+    stage: 'clauses' | 'requirements' | 'references';
+    log: (level: 'info' | 'warn' | 'error', message: string) => Promise<void> | void;
+    onProgress: AgentCompileCallbacks['onProgress'];
+    // biome-ignore lint/suspicious/noExplicitAny: the SDK's Agent output generic varies per stage.
+    agent: () => Agent<unknown, any>;
+    content: string;
+    describe: (output: T) => string;
+  }): Promise<T> {
+    const { stage, log, onProgress, agent, content, describe } = args;
+    await onProgress?.(stage, 0);
+    await log('info', `[${stage}] 请求发出，等待响应…（content ≈ ${content.length} 字符）`);
+    const t0 = Date.now();
+    try {
+      const result = await run(agent(), [{ role: 'user', content }]);
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      const out = result.finalOutput;
+      if (out === undefined || out === null) {
+        throw new Error(`stage ${stage} 返回空输出`);
+      }
+      await log('info', `[${stage}] ✓ ${elapsed}s · ${describe(out as T)}`);
+      await onProgress?.(stage, 1);
+      return out as T;
+    } catch (err) {
+      const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
+      await log('error', `[${stage}] ✗ ${elapsed}s · ${describeError(err)}`);
+      throw err;
+    }
+  }
 }
 
-function ensureOutput<T>(out: unknown, stage: string): T {
-  if (out === undefined || out === null) {
-    throw new Error(`Agent returned no output for stage ${stage}`);
-  }
-  return out as T;
+/** Extract the useful bits from an OpenAI SDK error (status / code / body) for logging. */
+function describeError(err: unknown): string {
+  if (!err || typeof err !== 'object') return String(err);
+  const e = err as {
+    name?: string;
+    message?: string;
+    status?: number;
+    code?: string | number;
+    type?: string;
+    error?: { message?: string; type?: string; code?: string | number };
+    cause?: { message?: string; code?: string };
+  };
+  const parts: string[] = [];
+  if (e.name) parts.push(e.name);
+  if (e.status !== undefined) parts.push(`HTTP ${e.status}`);
+  if (e.code !== undefined) parts.push(`code=${e.code}`);
+  if (e.type) parts.push(`type=${e.type}`);
+  const bodyMsg = e.error?.message;
+  if (bodyMsg) parts.push(`body="${bodyMsg.slice(0, 300)}"`);
+  else if (e.message) parts.push(e.message.slice(0, 300));
+  if (e.cause?.code) parts.push(`cause=${e.cause.code}`);
+  return parts.join(' · ') || 'unknown error';
 }
 
 function standardHeader(ctx: AgentCompileContext): string {

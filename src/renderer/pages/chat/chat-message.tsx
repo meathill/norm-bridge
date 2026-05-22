@@ -29,6 +29,26 @@ export function ChatMessageView({ message }: { message: ChatMessage }) {
 }
 
 function SystemBubble({ msg }: { msg: ChatSystemMessage }) {
+  // Dense = operational log line: compact monospace row, not a chat bubble.
+  if (msg.dense) {
+    const logTone = {
+      info: 'text-muted-foreground',
+      success: 'text-emerald-400',
+      warning: 'text-amber-400',
+      error: 'text-destructive',
+    }[msg.variant ?? 'info'];
+    return (
+      <div
+        className={cn(
+          'w-full self-stretch whitespace-pre-wrap break-words px-1 font-mono text-[11px] leading-relaxed',
+          logTone,
+        )}
+      >
+        {msg.text}
+      </div>
+    );
+  }
+
   const tone = {
     info: 'border-border bg-card text-foreground',
     success: 'border-emerald-500/30 bg-emerald-500/5 text-emerald-100',

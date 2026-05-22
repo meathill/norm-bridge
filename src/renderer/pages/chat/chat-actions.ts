@@ -177,16 +177,19 @@ function waitForJob(jobId: string, patch: (p: Partial<ChatJobMessage>) => void):
       if (event.type === 'progress') {
         patch({ progress: event.progress, ...(event.message ? { message: event.message } : {}) });
       } else if (event.type === 'log') {
-        // Surface warns / errors inline so the user catches truncation, retries, etc.
-        if (event.level === 'warn' || event.level === 'error') {
-          useChatStore.getState().append({
-            id: nextChatId('msg'),
-            type: 'system',
-            variant: event.level === 'error' ? 'error' : 'warning',
-            createdAt: new Date().toISOString(),
-            text: event.message,
-          });
-        }
+        // Verbose by design: surface every log line (info/warn/error) inline so the
+        // user can see exactly what each LLM call is doing, how long it takes, and
+        // what failed. This is a professional tool — detail beats hiding.
+        const variant =
+          event.level === 'error' ? 'error' : event.level === 'warn' ? 'warning' : 'info';
+        useChatStore.getState().append({
+          id: nextChatId('msg'),
+          type: 'system',
+          variant,
+          dense: true,
+          createdAt: new Date().toISOString(),
+          text: `${new Date(event.at).toLocaleTimeString()} ${event.message}`,
+        });
       } else if (event.type === 'finished') {
         off();
         if (event.status === 'succeeded') {
