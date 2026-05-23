@@ -31,7 +31,8 @@ export type RuntimeAgentConfig = {
 const DEFAULT_MODEL = 'gpt-4.1-mini';
 /** Per-request timeout. A hung third-party endpoint should fail loudly, not freeze the UI. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
-const DEFAULT_MAX_RETRIES = 1;
+/** Default 0: a slow endpoint that times out won't get better on retry — fail fast and surface it. */
+const DEFAULT_MAX_RETRIES = 0;
 /** Default to chat completions because most OpenAI-compatible third-party providers
  * (DeepSeek, 通义千问, OpenRouter, Xiaomi MiMo, vLLM, …) only implement that endpoint
  * and return 404 for /v1/responses. OpenAI users can opt in with OPENAI_API_STYLE=responses. */

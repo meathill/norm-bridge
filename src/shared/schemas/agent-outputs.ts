@@ -79,6 +79,19 @@ export const referenceResolverOutputSchema = z.object({
   references: z.array(referenceCandidateSchema).default([]),
 });
 
+/**
+ * Single-call output: clauses + requirements + references together. We send the
+ * section text once and ask for everything in one response — far cheaper and
+ * faster than three sequential calls (which each re-send the full text), which
+ * matters a lot for slow third-party endpoints.
+ */
+export const combinedCompileOutputSchema = z.object({
+  clauses: z.array(clauseCandidateSchema).default([]),
+  requirements: z.array(requirementCandidateSchema).default([]),
+  references: z.array(referenceCandidateSchema).default([]),
+});
+export type CombinedCompileOutput = z.infer<typeof combinedCompileOutputSchema>;
+
 export {
   citationAnchorSchema,
   clauseCandidateSchema,

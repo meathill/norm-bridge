@@ -7,6 +7,16 @@ export const STANDARD_SCHEMA_VERSION = '0.1' as const;
 
 export type ReviewStatus = 'unreviewed' | 'verified' | 'rejected' | 'needs_review';
 
+/** Summary of an already-compiled standard (for "you already have this, just search"). */
+export type CompiledStandardSummary = {
+  standardId: string;
+  sourceId: string;
+  title?: string;
+  clauseCount: number;
+  requirementCount: number;
+  referenceCount: number;
+};
+
 export type StandardRecord = {
   id: string;
   sourceId: string;

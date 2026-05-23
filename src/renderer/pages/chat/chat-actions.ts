@@ -39,16 +39,31 @@ export async function importDroppedFiles(filePaths: string[]): Promise<void> {
 
     try {
       const result = await window.nb.import.standardPdf({ filePath });
+      // If this source was already compiled, don't push the user to recompile.
+      const compiled = await window.nb.standard
+        .listCompiled()
+        .catch(() => [])
+        .then((list) => list.find((c) => c.sourceId === result.source.id));
       const inspectionMsg: ChatInspectionMessage = {
         id: nextChatId('msg'),
         type: 'inspection',
         createdAt: new Date().toISOString(),
         source: result.source,
         inspection: result.inspection,
-        awaitingStart: true,
+        awaitingStart: !compiled,
       };
       useChatStore.getState().append(inspectionMsg);
-      if (result.alreadyExisted) {
+      if (compiled) {
+        useChatStore.getState().append({
+          id: nextChatId('msg'),
+          type: 'system',
+          variant: 'success',
+          createdAt: new Date().toISOString(),
+          text:
+            `这份 PDF 已编译过（${compiled.clauseCount} 条款 / ${compiled.requirementCount} requirement），` +
+            `直接输入产品查询即可，无需重新分析。`,
+        });
+      } else if (result.alreadyExisted) {
         useChatStore.getState().append({
           id: nextChatId('msg'),
           type: 'system',

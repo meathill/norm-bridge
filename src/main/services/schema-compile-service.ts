@@ -81,6 +81,35 @@ export class SchemaCompileService {
     this.catalog = new CatalogService(sqlite);
   }
 
+  /** Standards already compiled in this project (so the UI can offer search without recompiling). */
+  listCompiled(): import('@shared/domain/standard-schema').CompiledStandardSummary[] {
+    const rows = this.sqlite
+      .prepare(
+        `SELECT s.id AS standardId, s.source_id AS sourceId, s.title AS title,
+                (SELECT COUNT(*) FROM clauses WHERE standard_id = s.id) AS clauseCount,
+                (SELECT COUNT(*) FROM requirements WHERE standard_id = s.id) AS requirementCount,
+                (SELECT COUNT(*) FROM standard_references WHERE from_standard_id = s.id) AS referenceCount
+         FROM standards s
+         ORDER BY s.created_at DESC`,
+      )
+      .all() as Array<{
+      standardId: string;
+      sourceId: string;
+      title: string | null;
+      clauseCount: number;
+      requirementCount: number;
+      referenceCount: number;
+    }>;
+    return rows.map((r) => ({
+      standardId: r.standardId,
+      sourceId: r.sourceId,
+      ...(r.title ? { title: r.title } : {}),
+      clauseCount: r.clauseCount,
+      requirementCount: r.requirementCount,
+      referenceCount: r.referenceCount,
+    }));
+  }
+
   async start(input: StartSchemaCompileInput): Promise<{ jobId: string }> {
     const project = this.session.getCurrent();
     if (!project) throw new Error('No project is open.');

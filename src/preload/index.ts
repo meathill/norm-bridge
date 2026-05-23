@@ -36,6 +36,9 @@ const api: NbApi = {
       };
     },
   },
+  standard: {
+    listCompiled: () => invoke('standard:list-compiled', undefined as never),
+  },
   artifact: {
     readJson: <T = unknown>(req: IpcReq<'artifact:read-json'>) =>
       invoke('artifact:read-json', req) as Promise<T>,

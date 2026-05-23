@@ -9,6 +9,7 @@ import type {
 import type { ProjectInfo, ProjectStatus } from './domain/project';
 import type { SearchQueryInput, SearchQueryResult } from './domain/search';
 import type { SourceFile } from './domain/source';
+import type { CompiledStandardSummary } from './domain/standard-schema';
 
 /**
  * Single source of truth for renderer ↔ main IPC channels.
@@ -45,6 +46,11 @@ export type IpcContract = {
   'job:start-schema-compile': {
     req: { sourceId: string };
     res: StartJobResult;
+  };
+  /** Standards already compiled in the open project (persisted in SQLite). */
+  'standard:list-compiled': {
+    req: void;
+    res: CompiledStandardSummary[];
   };
   'job:get': { req: { jobId: string }; res: JobInfo | null };
   'job:list': { req: { kind?: JobKind; sourceId?: string }; res: JobInfo[] };
@@ -123,6 +129,9 @@ export type NbApi = {
     get(req: IpcReq<'job:get'>): Promise<IpcRes<'job:get'>>;
     list(req: IpcReq<'job:list'>): Promise<IpcRes<'job:list'>>;
     onEvent(handler: (event: JobEvent) => void): () => void;
+  };
+  standard: {
+    listCompiled(): Promise<IpcRes<'standard:list-compiled'>>;
   };
   artifact: {
     readJson<T = unknown>(req: IpcReq<'artifact:read-json'>): Promise<T>;

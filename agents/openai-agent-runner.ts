@@ -1,12 +1,7 @@
 import { Agent, run } from '@openai/agents';
-import type { z } from 'zod';
 import {
-  clauseCompilerOutputSchema,
-  referenceResolverOutputSchema,
-  requirementExtractorOutputSchema,
-  type ClauseCompilerOutput,
-  type ReferenceResolverOutput,
-  type RequirementExtractorOutput,
+  combinedCompileOutputSchema,
+  type CombinedCompileOutput,
 } from '@shared/schemas/agent-outputs';
 import type { PdfTextBlock } from '@shared/domain/pdf-extract';
 import type {
@@ -19,38 +14,39 @@ import { configureOpenAiRuntime } from './runtime-config';
 
 // We do NOT use the SDK's structured-output (`outputType`) because third-party
 // OpenAI-compatible endpoints (Xiaomi MiMo, DeepSeek, vLLM, …) mishandle strict
-// json_schema, producing output the SDK then rejects. Instead each agent is a
-// plain chat agent that we instruct to emit JSON; we extract + leniently parse
-// it ourselves, which is far more compatible and lets us log the raw output.
+// json_schema. And we do everything in ONE call per section: three sequential
+// calls each re-sent the full text, which on a slow endpoint blew the timeout.
 
-const JSON_RULES = `Output ONLY a single JSON object, no markdown fences, no prose before or after.
-Quotes must be copied verbatim from the input text. Never invent content.`;
-
-const CLAUSE_INSTRUCTIONS = `You compile a technical-standard PDF section into a clause tree.
+const INSTRUCTIONS = `You compile one section of a technical-standard PDF into structured data.
 The user message contains text blocks tagged by page, e.g. "<page 12>\\n  [id] text".
-Detect headings ("N", "N.N", "01 74 19", "SECTION xx") and group the paragraphs under them.
-${JSON_RULES}
-JSON shape:
-{"clauses":[{"localId":"c1","parentLocalId":null,"clauseNo":"1.2","title":"...","pageStart":12,"pageEnd":13,"confidence":0.7,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
-- localId: any unique string you choose; parentLocalId: localId of the parent clause or null.
-- citationAnchors: 1+ short verbatim quotes (10-200 chars) with their page.`;
+Produce, in a SINGLE JSON object, three arrays:
 
-const REQUIREMENT_INSTRUCTIONS = `You extract mandatory requirements from a technical standard section.
-For each sentence using a modal verb (shall, shall not, must, must not, is required to), emit one requirement.
-${JSON_RULES}
-JSON shape:
-{"requirements":[{"localClauseId":"c1","requirementText":"The contractor shall ...","severity":"mandatory","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
-- localClauseId: the clause localId from the provided clause tree that owns this requirement (optional).
-- severity: "mandatory" for shall/must, "recommended" for should, else "informational".`;
+1. clauses — the clause tree. Detect headings ("N", "N.N", "01 74 19", "SECTION xx")
+   and group paragraphs under them.
+2. requirements — for every sentence using a modal verb (shall / shall not / must /
+   must not / is required to), one requirement.
+3. references — other standards referenced (e.g. "ISO 19650-1", "IEC 60898-1:2015",
+   "ASTM C150", "EN 1991").
 
-const REFERENCE_INSTRUCTIONS = `You identify other standards referenced from this section.
-Look for codes like "IEC 60898-1:2015", "GB/T 14048", "ISO 19650", "ASTM C150", "EN 1991".
-${JSON_RULES}
-JSON shape:
-{"references":[{"referencedStandardCode":"ISO 19650-1","relationType":"normative","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]}
-- relationType: normative | informative | equivalent | adopted | replaces | replaced_by | unknown.`;
+Output ONLY the JSON object, no markdown fences, no prose. Quotes must be copied
+verbatim from the input. Never invent content.
 
-const DEFAULT_MAX_PROMPT_BLOCKS = 2000;
+JSON shape:
+{
+  "clauses":[{"localId":"c1","parentLocalId":null,"clauseNo":"1.2","title":"...","pageStart":12,"pageEnd":13,"confidence":0.7,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}],
+  "requirements":[{"localClauseId":"c1","requirementText":"The contractor shall ...","severity":"mandatory","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}],
+  "references":[{"referencedStandardCode":"ISO 19650-1","relationType":"normative","confidence":0.6,"citationAnchors":[{"page":12,"quote":"verbatim text"}]}]
+}
+
+- localId: any unique string; parentLocalId: a clause localId or null.
+- localClauseId: the clause localId that owns the requirement (optional).
+- severity: "mandatory" for shall/must, "recommended" for should, else "informational".
+- relationType: normative | informative | equivalent | adopted | replaces | replaced_by | unknown.
+- citationAnchors: 1+ short verbatim quotes (10-200 chars) with their page.
+- If a section has nothing of a kind, return an empty array for it.`;
+
+/** Default block cap per section call. Smaller = faster + far less likely to time out. */
+const DEFAULT_MAX_PROMPT_BLOCKS = 800;
 
 function envMaxBlocks(): number | null {
   const raw = (process.env['NORMBRIDGE_MAX_BLOCKS_PER_PROMPT'] ?? '').trim();
@@ -90,8 +86,8 @@ export class OpenAiAgentRunner implements AgentRunner {
     const cap = this.maxBlocks;
     const usedBlocks = Math.min(cap, ctx.textBlocks.length);
     const text = blocksToPromptText(ctx.textBlocks, cap);
-    const promptChars = text.length;
-    const estTokens = Math.round(promptChars / 4);
+    const content = `${standardHeader(ctx)}\n\n${text}`;
+    const estTokens = Math.round(content.length / 4);
 
     const log = (level: 'info' | 'warn' | 'error', message: string) =>
       callbacks?.onLog?.(level, message);
@@ -103,125 +99,86 @@ export class OpenAiAgentRunner implements AgentRunner {
     );
     await log(
       'info',
-      `输入 · 文本块 ${usedBlocks}/${ctx.textBlocks.length} · prompt ≈ ${promptChars} 字符 / ~${estTokens} tokens · 页 ${ctx.pages[0]?.page ?? '?'}–${ctx.pages[ctx.pages.length - 1]?.page ?? '?'}`,
+      `输入 · 文本块 ${usedBlocks}/${ctx.textBlocks.length} · prompt ≈ ${content.length} 字符 / ~${estTokens} tokens · 页 ${ctx.pages[0]?.page ?? '?'}–${ctx.pages[ctx.pages.length - 1]?.page ?? '?'}`,
     );
     if (ctx.textBlocks.length > cap) {
       await log(
         'warn',
         `文本块 ${ctx.textBlocks.length} 超过单次上限 ${cap}，已截断处理前 ${cap} 个。` +
-          `调 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT 处理更多。`,
+          `调 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT 处理更多（但更慢、更易超时）。`,
       );
     }
-    if (estTokens > 24000) {
+    if (estTokens > 16000) {
       await log(
         'warn',
-        `prompt 估算 ~${estTokens} tokens，较大，可能超出模型上下文。可调小 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT。`,
+        `prompt 估算 ~${estTokens} tokens，偏大，慢端点可能超时。可调小 NORMBRIDGE_MAX_BLOCKS_PER_PROMPT。`,
       );
     }
 
-    const header = standardHeader(ctx);
-
-    const clauses = await this.runStage({
-      stage: 'clauses',
-      log,
-      onProgress: callbacks?.onProgress,
-      model,
-      instructions: CLAUSE_INSTRUCTIONS,
-      content: `${header}\n\n${text}`,
-      schema: clauseCompilerOutputSchema,
-      describe: (o) => `${o.clauses.length} 条款`,
-    });
-
-    const requirements = await this.runStage({
-      stage: 'requirements',
-      log,
-      onProgress: callbacks?.onProgress,
-      model,
-      instructions: REQUIREMENT_INSTRUCTIONS,
-      content: `${header}\n\nClause tree:\n${JSON.stringify(
-        clauses.clauses.map((c) => ({ localId: c.localId, clauseNo: c.clauseNo, title: c.title })),
-      )}\n\nText blocks:\n${text}`,
-      schema: requirementExtractorOutputSchema,
-      describe: (o) => `${o.requirements.length} 个 requirement`,
-    });
-
-    const references = await this.runStage({
-      stage: 'references',
-      log,
-      onProgress: callbacks?.onProgress,
-      model,
-      instructions: REFERENCE_INSTRUCTIONS,
-      content: `${header}\n\n${text}`,
-      schema: referenceResolverOutputSchema,
-      describe: (o) => `${o.references.length} 个引用标准`,
-    });
-
-    return { clauses, requirements, references };
-  }
-
-  private async runStage<S extends z.ZodTypeAny>(args: {
-    stage: 'clauses' | 'requirements' | 'references';
-    log: (level: 'info' | 'warn' | 'error', message: string) => Promise<void> | void;
-    onProgress: AgentCompileCallbacks['onProgress'];
-    model: string;
-    instructions: string;
-    content: string;
-    schema: S;
-    describe: (output: z.infer<S>) => string;
-  }): Promise<z.infer<S>> {
-    const { stage, log, onProgress, model, instructions, content, schema, describe } = args;
-    await onProgress?.(stage, 0);
-    await log('info', `[${stage}] 请求发出，等待响应…（content ≈ ${content.length} 字符）`);
+    await callbacks?.onProgress?.('clauses', 0);
+    await log(
+      'info',
+      `[compile] 请求发出，等待响应…（content ≈ ${content.length} 字符，单次返回全部）`,
+    );
     const t0 = Date.now();
 
-    const agent = new Agent({ name: `nb-${stage}`, instructions, model });
+    const agent = new Agent({ name: 'nb-compile', instructions: INSTRUCTIONS, model });
     let rawText: string;
     try {
       const result = await run(agent, [{ role: 'user', content }]);
       rawText = typeof result.finalOutput === 'string' ? result.finalOutput : '';
     } catch (err) {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-      await log('error', `[${stage}] ✗ ${elapsed}s · ${describeError(err)}`);
+      await log('error', `[compile] ✗ ${elapsed}s · ${describeError(err)}`);
       throw err;
     }
 
     const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-    await log('info', `[${stage}] 响应到达 ${elapsed}s · ${rawText.length} 字符，开始解析…`);
+    await log('info', `[compile] 响应到达 ${elapsed}s · ${rawText.length} 字符，开始解析…`);
 
-    const jsonText = extractJsonObject(rawText);
-    if (!jsonText) {
-      await log('error', `[${stage}] ✗ 响应里找不到 JSON。原始前 400 字：${rawText.slice(0, 400)}`);
-      throw new Error(`stage ${stage}: no JSON object in model output`);
-    }
-
-    let parsedJson: unknown;
-    try {
-      parsedJson = JSON.parse(jsonText);
-    } catch (err) {
+    const parsed = parseCombined(rawText);
+    if (!parsed.ok) {
       await log(
         'error',
-        `[${stage}] ✗ JSON.parse 失败：${(err as Error).message}。JSON 前 400 字：${jsonText.slice(0, 400)}`,
+        `[compile] ✗ 解析失败：${parsed.error}。原始前 400 字：${rawText.slice(0, 400)}`,
       );
-      throw new Error(`stage ${stage}: invalid JSON`);
+      throw new Error(`compile parse failed: ${parsed.error}`);
     }
+    const data = parsed.data;
+    await log(
+      'info',
+      `[compile] ✓ ${elapsed}s · ${data.clauses.length} 条款 / ${data.requirements.length} requirement / ${data.references.length} 引用`,
+    );
+    await callbacks?.onProgress?.('references', 1);
 
-    const result = schema.safeParse(parsedJson);
-    if (!result.success) {
-      const issues = result.error.issues
-        .slice(0, 5)
-        .map((i) => `${i.path.join('.')}: ${i.message}`)
-        .join('; ');
-      await log(
-        'error',
-        `[${stage}] ✗ schema 校验失败：${issues}。JSON 前 400 字：${jsonText.slice(0, 400)}`,
-      );
-      throw new Error(`stage ${stage}: schema validation failed (${issues})`);
-    }
-
-    await log('info', `[${stage}] ✓ ${elapsed}s · ${describe(result.data)}`);
-    await onProgress?.(stage, 1);
-    return result.data;
+    return {
+      clauses: { clauses: data.clauses },
+      requirements: { requirements: data.requirements },
+      references: { references: data.references },
+    };
   }
+}
+
+type ParseResult = { ok: true; data: CombinedCompileOutput } | { ok: false; error: string };
+
+function parseCombined(rawText: string): ParseResult {
+  const jsonText = extractJsonObject(rawText);
+  if (!jsonText) return { ok: false, error: '响应里找不到 JSON 对象' };
+  let json: unknown;
+  try {
+    json = JSON.parse(jsonText);
+  } catch (err) {
+    return { ok: false, error: `JSON.parse 失败：${(err as Error).message}` };
+  }
+  const result = combinedCompileOutputSchema.safeParse(json);
+  if (!result.success) {
+    const issues = result.error.issues
+      .slice(0, 5)
+      .map((i) => `${i.path.join('.')}: ${i.message}`)
+      .join('; ');
+    return { ok: false, error: `schema 校验失败：${issues}` };
+  }
+  return { ok: true, data: result.data };
 }
 
 /** Pull the outermost JSON object out of a model response (handles ```json fences). */

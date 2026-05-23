@@ -72,6 +72,31 @@ export function ChatPage() {
             ` 与可选的 OPENAI_BASE_URL / NORMBRIDGE_AGENT_MODEL，然后重启 app。`,
         });
       }
+
+      // Already-compiled standards persist in SQLite — surface them so the user
+      // knows they can search right away without re-running the compile.
+      try {
+        const compiled = await window.nb.standard.listCompiled();
+        const usable = compiled.filter((c) => c.requirementCount > 0 || c.clauseCount > 0);
+        if (usable.length > 0) {
+          const lines = usable
+            .slice(0, 10)
+            .map(
+              (c) =>
+                `· ${c.title ?? c.standardId} — ${c.clauseCount} 条款 / ${c.requirementCount} requirement / ${c.referenceCount} 引用`,
+            )
+            .join('\n');
+          chat.append({
+            id: nextChatId('msg'),
+            type: 'system',
+            variant: 'success',
+            createdAt: new Date().toISOString(),
+            text: `📚 本项目已有 ${usable.length} 个已编译标准，可直接输入产品查询，无需重新分析：\n${lines}`,
+          });
+        }
+      } catch {
+        // non-fatal: listing is a convenience
+      }
     })();
   }, [current, refreshRuntime]);
 

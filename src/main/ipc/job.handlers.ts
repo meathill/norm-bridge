@@ -11,6 +11,10 @@ export function registerJobHandlers(register: HandlerRegistrar, deps: IpcDeps): 
     return schemaCompileService.start({ sourceId });
   });
 
+  register('standard:list-compiled', () => {
+    return schemaCompileService.listCompiled();
+  });
+
   register('job:get', ({ jobId }) => {
     return jobService.getJob(jobId);
   });
