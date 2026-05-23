@@ -7,7 +7,7 @@ import type {
   SearchResultCard,
   SearchStandardRef,
 } from '@shared/domain/search';
-import type { SearchRunner } from '@agents/search-runner';
+import { type SearchRunner, tokenize } from '@agents/search-runner';
 import type { ProjectSession } from './project-session';
 import type { SqliteService } from './sqlite-service';
 
@@ -59,10 +59,17 @@ export class SearchService {
       query: input.text,
     };
     if (knownCodes.length > 0) expansionInput.knownStandardCodes = knownCodes;
-    let expansion: SearchExpansion = await this.runner.expand(expansionInput);
+    // Keyword retrieval must work even if the LLM expander is slow/down or (for
+    // third-party endpoints) mishandles strict json_schema. Any expand failure or
+    // empty result falls back to local tokenization, so search never hard-fails.
+    let expansion: SearchExpansion;
+    try {
+      expansion = await this.runner.expand(expansionInput);
+    } catch {
+      expansion = { tokens: [] };
+    }
     if (expansion.tokens.length === 0) {
-      // Fall back to a plain whitespace split so we never end up with no tokens.
-      expansion = { tokens: input.text.toLowerCase().split(/\s+/).filter(Boolean) };
+      expansion = { tokens: tokenize(input.text) };
     }
 
     const cards = this.runKeywordSearch(expansion.tokens, input.sourceId, limit);
