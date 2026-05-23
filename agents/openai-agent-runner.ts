@@ -11,6 +11,7 @@ import type {
   AgentRunner,
 } from './agent-runner';
 import { configureOpenAiRuntime } from './runtime-config';
+import { isRetryableLlmError, withRetry } from './retry';
 
 // We do NOT use the SDK's structured-output (`outputType`) because third-party
 // OpenAI-compatible endpoints (Xiaomi MiMo, DeepSeek, vLLM, …) mishandle strict
@@ -54,6 +55,28 @@ function envMaxBlocks(): number | null {
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n) || n <= 0) return null;
   return n;
+}
+
+/**
+ * Per-section retry policy. One section = one combined LLM call, so these read
+ * as "section retries" to the user even though they wrap a single request.
+ * Defaults: retry once, cooling down 20s first (then exponential backoff). Set
+ * NORMBRIDGE_SECTION_RETRIES=0 to disable.
+ */
+const DEFAULT_SECTION_RETRIES = 1;
+const DEFAULT_RETRY_COOLDOWN_MS = 20_000;
+
+function envInt(name: string, fallback: number, min: number): number {
+  const n = Number.parseInt((process.env[name] ?? '').trim(), 10);
+  return Number.isFinite(n) && n >= min ? n : fallback;
+}
+
+function sectionRetries(): number {
+  return envInt('NORMBRIDGE_SECTION_RETRIES', DEFAULT_SECTION_RETRIES, 0);
+}
+
+function retryCooldownMs(): number {
+  return envInt('NORMBRIDGE_RETRY_COOLDOWN_MS', DEFAULT_RETRY_COOLDOWN_MS, 0);
 }
 
 export type OpenAiRunnerOptions = {
@@ -123,13 +146,26 @@ export class OpenAiAgentRunner implements AgentRunner {
     const t0 = Date.now();
 
     const agent = new Agent({ name: 'nb-compile', instructions: INSTRUCTIONS, model });
+    const retries = sectionRetries();
     let rawText: string;
     try {
-      const result = await run(agent, [{ role: 'user', content }]);
+      const result = await withRetry(() => run(agent, [{ role: 'user', content }]), {
+        retries,
+        cooldownMs: retryCooldownMs(),
+        isRetryable: isRetryableLlmError,
+        onRetry: async ({ attempt, retries: total, delayMs, error }) => {
+          await log(
+            'warn',
+            `[compile] ⏳ 第 ${attempt}/${total} 次重试 · 冷却 ${Math.round(delayMs / 1000)}s 后再试` +
+              `（多为端点高负载，瞬时可恢复）· 上次：${describeError(error)}`,
+          );
+        },
+      });
       rawText = typeof result.finalOutput === 'string' ? result.finalOutput : '';
     } catch (err) {
       const elapsed = ((Date.now() - t0) / 1000).toFixed(1);
-      await log('error', `[compile] ✗ ${elapsed}s · ${describeError(err)}`);
+      const tail = retries > 0 ? `（已重试 ${retries} 次仍失败）` : '';
+      await log('error', `[compile] ✗ ${elapsed}s · ${describeError(err)}${tail}`);
       throw err;
     }
 
