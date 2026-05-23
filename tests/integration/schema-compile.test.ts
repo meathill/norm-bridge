@@ -283,6 +283,64 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
     }
   });
 
+  it('reuses cached window results on re-compile (no second LLM call)', async () => {
+    const pdf = join(tmpRoot, 'standard.pdf');
+    writeFileSync(
+      pdf,
+      makeMinimalPdf({
+        lines: ['1 Scope', 'The product shall be safe.', 'IEC 60898-1:2015 applies.'],
+      }),
+    );
+    const imp = await importService.importFile({ filePath: pdf, kind: 'standard_pdf' });
+    const extractStart = await jobService.startStandardExtract({ sourceId: imp.source.id });
+    await waitFinished(bus, extractStart.jobId);
+
+    const makeSpy = () => {
+      const mock = new MockAgentRunner();
+      const state = { calls: 0 };
+      const runner: AgentRunner = {
+        id: 'spy',
+        compile: (ctx: AgentCompileContext, cb?: AgentCompileCallbacks) => {
+          state.calls += 1;
+          return mock.compile(ctx, cb);
+        },
+      };
+      return { runner, state };
+    };
+
+    // First compile populates the cache and does real (mock) LLM calls.
+    const first = makeSpy();
+    const run1 = await compileService.start({ sourceId: imp.source.id, runner: first.runner });
+    await waitFinished(bus, run1.jobId);
+    expect(first.state.calls).toBeGreaterThan(0);
+    const clausesAfter1 = (
+      sqlite.prepare('SELECT COUNT(*) AS c FROM clauses').get() as { c: number }
+    ).c;
+    expect(clausesAfter1).toBeGreaterThan(0);
+
+    // Second compile of the same source: every window is served from cache, so
+    // the runner is never called — yet the DB is rebuilt identically.
+    const second = makeSpy();
+    const run2 = await compileService.start({ sourceId: imp.source.id, runner: second.runner });
+    await waitFinished(bus, run2.jobId);
+    expect(second.state.calls).toBe(0);
+    const clausesAfter2 = (
+      sqlite.prepare('SELECT COUNT(*) AS c FROM clauses').get() as { c: number }
+    ).c;
+    expect(clausesAfter2).toBe(clausesAfter1);
+
+    // Forcing the bypass re-calls the runner even though the cache is warm.
+    process.env.NORMBRIDGE_IGNORE_COMPILE_CACHE = '1';
+    try {
+      const third = makeSpy();
+      const run3 = await compileService.start({ sourceId: imp.source.id, runner: third.runner });
+      await waitFinished(bus, run3.jobId);
+      expect(third.state.calls).toBeGreaterThan(0);
+    } finally {
+      delete process.env.NORMBRIDGE_IGNORE_COMPILE_CACHE;
+    }
+  });
+
   it('refuses to compile when the source is not a standard PDF', async () => {
     const xlsx = join(tmpRoot, 'list.xlsx');
     writeFileSync(xlsx, 'not really xlsx');
