@@ -39,18 +39,22 @@ export async function importDroppedFiles(filePaths: string[]): Promise<void> {
 
     try {
       const result = await window.nb.import.standardPdf({ filePath });
-      // If this source was already compiled, don't push the user to recompile.
-      const compiled = await window.nb.standard
+      // A compile only "counts" if it actually produced clauses/requirements —
+      // an empty (failed) compile must not be treated as done. Either way the
+      // analyze button always stays available so the user can force a re-compile.
+      const prior = await window.nb.standard
         .listCompiled()
         .catch(() => [])
         .then((list) => list.find((c) => c.sourceId === result.source.id));
+      const compiled =
+        prior && (prior.requirementCount > 0 || prior.clauseCount > 0) ? prior : undefined;
       const inspectionMsg: ChatInspectionMessage = {
         id: nextChatId('msg'),
         type: 'inspection',
         createdAt: new Date().toISOString(),
         source: result.source,
         inspection: result.inspection,
-        awaitingStart: !compiled,
+        awaitingStart: true,
       };
       useChatStore.getState().append(inspectionMsg);
       if (compiled) {
@@ -61,7 +65,7 @@ export async function importDroppedFiles(filePaths: string[]): Promise<void> {
           createdAt: new Date().toISOString(),
           text:
             `这份 PDF 已编译过（${compiled.clauseCount} 条款 / ${compiled.requirementCount} requirement），` +
-            `直接输入产品查询即可，无需重新分析。`,
+            `可直接输入产品查询。若想重新分析，点「开始分析」会覆盖旧结果。`,
         });
       } else if (result.alreadyExisted) {
         useChatStore.getState().append({

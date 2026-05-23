@@ -123,8 +123,12 @@ export class CatalogService {
       .get(entry.code) as { id: string; origin: CatalogOrigin } | undefined;
 
     if (existing) {
-      // Upgrade a previously-referenced entry once we actually import its PDF.
-      if (entry.origin === 'imported' && existing.origin !== 'imported') {
+      // Re-link to the freshly compiled standards row whenever we import (or
+      // re-import) this code. The persist step nulls the old standard_id before
+      // deleting the prior standards row, so on re-compile we must re-point it
+      // here even if the entry was already 'imported' — otherwise the catalog
+      // would keep a NULL link to a standard we actually have.
+      if (entry.origin === 'imported') {
         this.sqlite
           .prepare(
             'UPDATE standard_catalog SET origin = ?, standard_id = ?, title = COALESCE(?, title), issuing_body = COALESCE(?, issuing_body) WHERE id = ?',

@@ -171,6 +171,65 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
     expect(links.c).toBeGreaterThanOrEqual(1);
   });
 
+  it('re-compile replaces instead of appending (idempotent rows + re-linked catalog)', async () => {
+    const pdf = join(tmpRoot, 'standard.pdf');
+    writeFileSync(
+      pdf,
+      makeMinimalPdf({
+        lines: [
+          '1 Scope',
+          'This standard applies to circuit breakers.',
+          '1.1 General',
+          'The product shall be safe.',
+          '2 Normative references',
+          'IEC 60898-1:2015 applies.',
+        ],
+      }),
+    );
+    const imp = await importService.importFile({ filePath: pdf, kind: 'standard_pdf' });
+    const extractStart = await jobService.startStandardExtract({ sourceId: imp.source.id });
+    await waitFinished(bus, extractStart.jobId);
+
+    // First compile.
+    const first = await compileService.start({ sourceId: imp.source.id });
+    await waitFinished(bus, first.jobId);
+    const countOf = (table: string) =>
+      (sqlite.prepare(`SELECT COUNT(*) AS c FROM ${table}`).get() as { c: number }).c;
+    const after1 = {
+      standards: countOf('standards'),
+      clauses: countOf('clauses'),
+      requirements: countOf('requirements'),
+      citations: countOf('citations'),
+      references: countOf('standard_references'),
+    };
+    expect(after1.standards).toBe(1);
+    expect(after1.clauses).toBeGreaterThan(0);
+
+    // Second compile of the SAME source must replace, not stack.
+    const second = await compileService.start({ sourceId: imp.source.id });
+    await waitFinished(bus, second.jobId);
+    expect(countOf('standards')).toBe(1);
+    expect(countOf('clauses')).toBe(after1.clauses);
+    expect(countOf('requirements')).toBe(after1.requirements);
+    expect(countOf('citations')).toBe(after1.citations);
+    expect(countOf('standard_references')).toBe(after1.references);
+
+    // No orphaned requirement_citations point at a deleted requirement.
+    const orphanReqCit = sqlite
+      .prepare(
+        'SELECT COUNT(*) AS c FROM requirement_citations WHERE requirement_id NOT IN (SELECT id FROM requirements)',
+      )
+      .get() as { c: number };
+    expect(orphanReqCit.c).toBe(0);
+
+    // The catalog's imported entry is re-linked to the freshly compiled standards row.
+    const liveStandardId = (sqlite.prepare('SELECT id FROM standards').get() as { id: string }).id;
+    const importedCatalog = sqlite
+      .prepare("SELECT standard_id FROM standard_catalog WHERE origin = 'imported'")
+      .get() as { standard_id: string | null } | undefined;
+    expect(importedCatalog?.standard_id).toBe(liveStandardId);
+  });
+
   it('refuses to compile when the source is not a standard PDF', async () => {
     const xlsx = join(tmpRoot, 'list.xlsx');
     writeFileSync(xlsx, 'not really xlsx');

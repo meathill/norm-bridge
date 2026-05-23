@@ -545,6 +545,13 @@ export class SchemaCompileService {
 
   private persistToSqlite(built: BuiltSchema): void {
     this.sqlite.tx(() => {
+      // Re-compile replaces, never appends. Clear every row owned by prior
+      // compiles of this source so a second run can't duplicate clauses or leave
+      // a stale empty `standards` row behind. Children first, `standards` last,
+      // so the `WHERE source_id` subqueries still resolve. The catalog FK is
+      // nulled (the entry itself is re-linked by CatalogService.sync afterwards).
+      this.deletePriorForSource(built.standard.sourceId);
+
       this.sqlite
         .prepare(
           `INSERT INTO standards (id, source_id, title, country_or_region, version, publication_date, scope, status, created_at, updated_at)
@@ -648,6 +655,33 @@ export class SchemaCompileService {
         );
       }
     });
+  }
+
+  /**
+   * Drop all rows from prior compiles of `sourceId` so a re-compile replaces
+   * instead of appending. Runs inside the persist transaction. Order matters
+   * under `PRAGMA foreign_keys = ON`: delete children before parents, null the
+   * catalog → standards FK, and delete `standards` last so the `source_id`
+   * subqueries keep resolving.
+   */
+  private deletePriorForSource(sourceId: string): void {
+    const owned = '(SELECT id FROM standards WHERE source_id = ?)';
+    this.sqlite
+      .prepare(
+        `DELETE FROM requirement_citations WHERE requirement_id IN
+           (SELECT id FROM requirements WHERE standard_id IN ${owned})`,
+      )
+      .run(sourceId);
+    this.sqlite.prepare(`DELETE FROM requirements WHERE standard_id IN ${owned}`).run(sourceId);
+    this.sqlite
+      .prepare(`DELETE FROM standard_references WHERE from_standard_id IN ${owned}`)
+      .run(sourceId);
+    this.sqlite.prepare(`DELETE FROM clauses WHERE standard_id IN ${owned}`).run(sourceId);
+    this.sqlite.prepare('DELETE FROM citations WHERE source_id = ?').run(sourceId);
+    this.sqlite
+      .prepare(`UPDATE standard_catalog SET standard_id = NULL WHERE standard_id IN ${owned}`)
+      .run(sourceId);
+    this.sqlite.prepare('DELETE FROM standards WHERE source_id = ?').run(sourceId);
   }
 
   private writeAudit(
