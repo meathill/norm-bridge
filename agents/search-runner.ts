@@ -39,10 +39,14 @@ export class MockSearchRunner implements SearchRunner {
   }
 }
 
+// Lenient like agent-outputs: third-party endpoints emit `null` for "absent"
+// fields, and strict json_schema validation would reject it. SearchService also
+// catches any expand failure and falls back to local tokenization, so this is
+// belt-and-suspenders.
 const expansionSchema = z.object({
   tokens: z.array(z.string()).min(1),
-  productCategory: z.string().optional(),
-  parameters: z.record(z.string(), z.string()).optional(),
+  productCategory: z.string().nullish(),
+  parameters: z.record(z.string(), z.string()).nullish(),
 });
 
 const EXPANSION_INSTRUCTIONS = `You translate a free-text product description into search tokens
@@ -84,8 +88,14 @@ export class OpenAiSearchRunner implements SearchRunner {
         ? `\nReferenced standards already in the project: ${knownStandardCodes.join(', ')}`
         : '';
     const result = await run(agent, [{ role: 'user', content: `Query: ${query}${context}` }]);
-    if (!result.finalOutput) throw new Error('search expansion returned no output');
-    return result.finalOutput;
+    const out = result.finalOutput;
+    if (!out) throw new Error('search expansion returned no output');
+    // Normalize the lenient (nullable) parse back to the domain shape (no nulls).
+    return {
+      tokens: out.tokens,
+      ...(out.productCategory ? { productCategory: out.productCategory } : {}),
+      ...(out.parameters ? { parameters: out.parameters } : {}),
+    };
   }
 
   async summarize({ query, cards }: SearchSummaryInput): Promise<string | null> {

@@ -136,6 +136,22 @@ describe('SearchService (mock runner + LIKE retriever)', () => {
     expect(top!.standard.standardId).toBe(top!.standardId);
   });
 
+  it('falls back to local tokenization when the expander throws (never hard-fails)', async () => {
+    // Mimics a third-party endpoint that mishandles strict json_schema and makes
+    // expand() reject — search must still return keyword hits, not error out.
+    const throwingRunner = {
+      id: 'boom',
+      expand: async () => {
+        throw new Error('ModelBehaviorError: schema validation failed at productCategory');
+      },
+      summarize: async () => null,
+    };
+    const svc = new SearchService(session, sqlite, throwingRunner);
+    const result = await svc.query({ text: 'breaker shall trip 1A' });
+    expect(result.cards.length).toBeGreaterThan(0);
+    expect(result.cards[0]?.citations.length).toBeGreaterThan(0);
+  });
+
   it('returns no cards when no token matches', async () => {
     const result = await searchService.query({ text: 'xyz unrelated' });
     expect(result.cards).toHaveLength(0);
