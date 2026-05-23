@@ -39,12 +39,41 @@ export type StartSchemaCompileInput = {
   runner?: AgentRunner;
 };
 
+function envPositiveInt(name: string, fallback: number): number {
+  const n = Number.parseInt((process.env[name] ?? '').trim(), 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
 /** How many sections to process per compile run while we validate the approach. */
 function maxSections(): number {
-  const raw = (process.env['NORMBRIDGE_MAX_SECTIONS'] ?? '').trim();
-  const n = Number.parseInt(raw, 10);
-  if (Number.isFinite(n) && n > 0) return n;
-  return 5;
+  return envPositiveInt('NORMBRIDGE_MAX_SECTIONS', 5);
+}
+
+/**
+ * Blocks per LLM call. The model emits ~one requirement per modal verb, so the
+ * RESPONSE size scales with how many "shall/must" sentences a window contains —
+ * not with input length. Small windows keep each response well under the request
+ * timeout. Default 200 ≈ ~20 requirements/window on a dense spec.
+ */
+function blocksPerCall(): number {
+  return envPositiveInt('NORMBRIDGE_BLOCKS_PER_CALL', 200);
+}
+
+/** Cap windows per section so a giant section can't explode into 100s of calls. */
+function windowsPerSection(): number {
+  return envPositiveInt('NORMBRIDGE_WINDOWS_PER_SECTION', 4);
+}
+
+function chunkBlocks(blocks: PdfTextBlock[], size: number): PdfTextBlock[][] {
+  if (size <= 0) return [blocks];
+  const out: PdfTextBlock[][] = [];
+  for (let i = 0; i < blocks.length; i += size) out.push(blocks.slice(i, i + size));
+  return out;
+}
+
+function pagesForBlocks(pages: PdfPageInfo[], blocks: PdfTextBlock[]): PdfPageInfo[] {
+  const present = new Set(blocks.map((b) => b.page));
+  return pages.filter((p) => present.has(p.page));
 }
 
 type BuiltSchema = {
@@ -278,90 +307,121 @@ export class SchemaCompileService {
 
     const units = useSections ? selected : [syntheticWholeDocSection(standardId, pages)];
 
+    const perCall = blocksPerCall();
+    const maxWindows = windowsPerSection();
     for (let i = 0; i < units.length; i++) {
       const section = units[i];
       if (!section) continue;
       const sectionBlocks = useSections
         ? textBlocks.filter((b) => b.page >= section.pageStart && b.page <= section.pageEnd)
         : textBlocks;
-      const sectionPages = pages.filter(
-        (p) => p.page >= section.pageStart && p.page <= section.pageEnd,
-      );
 
-      const label = useSections
+      const sectionLabel = useSections
         ? `第 ${i + 1}/${units.length} 节 · ${section.title} (p${section.pageStart}-${section.pageEnd})`
         : '整文档';
-      await handle.emitProgress(0.1 + (i / units.length) * 0.75, label);
-
-      if (sectionBlocks.length === 0) {
-        await handle.emitLog('warn', `${label}：无文本块，跳过。`);
-        continue;
-      }
-
-      let raw: {
-        clauses: ClauseCompilerOutput;
-        requirements: RequirementExtractorOutput;
-        references: ReferenceResolverOutput;
-      };
-      // Each section runs 3 sequential LLM calls (clauses → requirements → references).
-      // Map their per-stage progress onto the overall bar so the UI shows movement
-      // instead of appearing frozen during a slow call.
       const sectionBase = 0.1 + (i / units.length) * 0.75;
       const sectionSpan = (1 / units.length) * 0.75;
-      const stageOffset = { clauses: 0, requirements: 1 / 3, references: 2 / 3 } as const;
-      try {
-        raw = await args.runner.compile(
-          {
-            sourceId: source.id,
-            sourceOriginalName: useSections
-              ? `${source.originalName} · ${section.title}`
-              : source.originalName,
-            pages: sectionPages,
-            textBlocks: sectionBlocks,
-          },
-          {
-            onLog: (level, message) => handle.emitLog(level, `[${runner.id}] ${message}`),
-            onProgress: async (stage, ratio) => {
-              const within = stageOffset[stage] + ratio * (1 / 3);
-              await handle.emitProgress(sectionBase + within * sectionSpan, `${label} · ${stage}`);
-            },
-          },
+      await handle.emitProgress(sectionBase, sectionLabel);
+
+      if (sectionBlocks.length === 0) {
+        await handle.emitLog('warn', `${sectionLabel}：无文本块，跳过。`);
+        continue;
+      }
+
+      // The TOC header becomes one root clause; every window's clauses hang under
+      // it. Created once so windowing can't duplicate the root row.
+      const rootClauseId = useSections ? this.pushSectionRoot(section, standardId, clauses) : null;
+
+      // Window each section into small block-chunks. The model emits ~one
+      // requirement per modal verb (shall/must), so a requirement-dense section
+      // crammed into one call produces a huge response that blows the timeout
+      // (this was the real cause of the section-3+ hangs). Smaller windows keep
+      // each response bounded; processing several windows also stops us silently
+      // truncating the section to its first N blocks.
+      const allWindows = chunkBlocks(sectionBlocks, perCall);
+      const windows = allWindows.slice(0, maxWindows);
+      const windowSpan = sectionSpan / windows.length;
+      if (allWindows.length > 1) {
+        const note =
+          allWindows.length > windows.length
+            ? `，本次处理前 ${windows.length} 个（调 NORMBRIDGE_WINDOWS_PER_SECTION 可加多）`
+            : '';
+        await handle.emitLog(
+          'info',
+          `${sectionLabel}：${sectionBlocks.length} 块按每次 ${perCall} 块切成 ${allWindows.length} 窗口${note}。`,
         );
-      } catch (err) {
-        // One bad section shouldn't abort the whole run during validation.
-        await handle.emitLog('error', `${label} 抽取失败：${(err as Error).message}`);
-        this.writeAudit('agent_output_invalid', 'source', source.id, {
-          jobId: handle.id,
-          runner: runner.id,
-          section: section.clauseNoGuess ?? section.title,
-          error: (err as Error).message,
-        });
-        continue;
       }
 
-      const clausesOut = clauseCompilerOutputSchema.safeParse(raw.clauses);
-      const requirementsOut = requirementExtractorOutputSchema.safeParse(raw.requirements);
-      const referencesOut = referenceResolverOutputSchema.safeParse(raw.references);
-      if (!clausesOut.success || !requirementsOut.success || !referencesOut.success) {
-        await handle.emitLog('error', `${label}：agent 输出未通过 schema 校验，跳过。`);
-        this.writeAudit('agent_output_invalid', 'source', source.id, {
-          jobId: handle.id,
-          section: section.clauseNoGuess ?? section.title,
-        });
-        continue;
-      }
+      for (let w = 0; w < windows.length; w++) {
+        const windowBlocks = windows[w];
+        if (!windowBlocks || windowBlocks.length === 0) continue;
+        const windowBase = sectionBase + w * windowSpan;
+        const label =
+          windows.length > 1 ? `${sectionLabel} · 窗口 ${w + 1}/${windows.length}` : sectionLabel;
+        await handle.emitProgress(windowBase, label);
 
-      this.appendSectionRecords({
-        standardId,
-        section: useSections ? section : null,
-        source,
-        blockIndex,
-        blocksByPage,
-        clauseOut: clausesOut.data,
-        requirementOut: requirementsOut.data,
-        referenceOut: referencesOut.data,
-        out: { clauses, requirements, references, citations },
-      });
+        let raw: {
+          clauses: ClauseCompilerOutput;
+          requirements: RequirementExtractorOutput;
+          references: ReferenceResolverOutput;
+        };
+        try {
+          raw = await args.runner.compile(
+            {
+              sourceId: source.id,
+              sourceOriginalName: useSections
+                ? `${source.originalName} · ${section.title}`
+                : source.originalName,
+              pages: pagesForBlocks(pages, windowBlocks),
+              textBlocks: windowBlocks,
+            },
+            {
+              onLog: (level, message) => handle.emitLog(level, `[${runner.id}] ${message}`),
+              onProgress: async (_stage, ratio) => {
+                await handle.emitProgress(windowBase + ratio * windowSpan, label);
+              },
+            },
+          );
+        } catch (err) {
+          // One bad window shouldn't abort the whole run during validation.
+          await handle.emitLog('error', `${label} 抽取失败：${(err as Error).message}`);
+          this.writeAudit('agent_output_invalid', 'source', source.id, {
+            jobId: handle.id,
+            runner: runner.id,
+            section: section.clauseNoGuess ?? section.title,
+            window: `${w + 1}/${windows.length}`,
+            error: (err as Error).message,
+          });
+          continue;
+        }
+
+        const clausesOut = clauseCompilerOutputSchema.safeParse(raw.clauses);
+        const requirementsOut = requirementExtractorOutputSchema.safeParse(raw.requirements);
+        const referencesOut = referenceResolverOutputSchema.safeParse(raw.references);
+        if (!clausesOut.success || !requirementsOut.success || !referencesOut.success) {
+          await handle.emitLog('error', `${label}：agent 输出未通过 schema 校验，跳过。`);
+          this.writeAudit('agent_output_invalid', 'source', source.id, {
+            jobId: handle.id,
+            section: section.clauseNoGuess ?? section.title,
+            window: `${w + 1}/${windows.length}`,
+          });
+          continue;
+        }
+
+        this.appendRecords({
+          standardId,
+          rootClauseId,
+          fallbackPageStart: useSections ? section.pageStart : undefined,
+          fallbackPageEnd: useSections ? section.pageEnd : undefined,
+          source,
+          blockIndex,
+          blocksByPage,
+          clauseOut: clausesOut.data,
+          requirementOut: requirementsOut.data,
+          referenceOut: referencesOut.data,
+          out: { clauses, requirements, references, citations },
+        });
+      }
     }
 
     return {
@@ -384,16 +444,36 @@ export class SchemaCompileService {
     };
   }
 
+  /** Push the TOC header as a root clause once per section; return its id. */
+  private pushSectionRoot(
+    section: SectionEntry,
+    standardId: string,
+    outClauses: ClauseRecord[],
+  ): string {
+    outClauses.push({
+      id: section.id,
+      standardId,
+      parentClauseId: null,
+      ...(section.clauseNoGuess ? { clauseNo: section.clauseNoGuess } : {}),
+      title: section.title,
+      pageStart: section.pageStart,
+      pageEnd: section.pageEnd,
+      reviewStatus: 'unreviewed',
+    });
+    return section.id;
+  }
+
   /**
-   * Turn one section's agent output into records and append to the shared
-   * accumulators. localId↔clauseId mapping is scoped to this section so ids
-   * never collide across sections. When a section header is known (from the
-   * TOC), it becomes a synthetic root clause and top-level agent clauses hang
-   * under it.
+   * Turn one window's agent output into records and append to the shared
+   * accumulators. localId↔clauseId mapping is scoped to THIS call so ids never
+   * collide across windows/sections; top-level agent clauses hang under the
+   * section's root clause (rootClauseId), created once by pushSectionRoot.
    */
-  private appendSectionRecords(args: {
+  private appendRecords(args: {
     standardId: string;
-    section: SectionEntry | null;
+    rootClauseId: string | null;
+    fallbackPageStart: number | undefined;
+    fallbackPageEnd: number | undefined;
     source: SourceFile;
     blockIndex: Map<string, PdfTextBlock>;
     blocksByPage: Map<number, PdfTextBlock[]>;
@@ -409,7 +489,9 @@ export class SchemaCompileService {
   }): void {
     const {
       standardId,
-      section,
+      rootClauseId,
+      fallbackPageStart,
+      fallbackPageEnd,
       source,
       blockIndex,
       blocksByPage,
@@ -418,24 +500,15 @@ export class SchemaCompileService {
       referenceOut,
       out,
     } = args;
-    const fallbackPage = section?.pageStart;
     const resolve = (anchors: CitationAnchor[] | undefined) =>
-      anchorsToCitations(anchors, source, blockIndex, blocksByPage, fallbackPage, out.citations);
-
-    let rootClauseId: string | null = null;
-    if (section) {
-      rootClauseId = section.id;
-      out.clauses.push({
-        id: section.id,
-        standardId,
-        parentClauseId: null,
-        ...(section.clauseNoGuess ? { clauseNo: section.clauseNoGuess } : {}),
-        title: section.title,
-        pageStart: section.pageStart,
-        pageEnd: section.pageEnd,
-        reviewStatus: 'unreviewed',
-      });
-    }
+      anchorsToCitations(
+        anchors,
+        source,
+        blockIndex,
+        blocksByPage,
+        fallbackPageStart,
+        out.citations,
+      );
 
     const localToClauseId = new Map<string, string>();
     for (const c of clauseOut.clauses) {
@@ -448,8 +521,8 @@ export class SchemaCompileService {
       const parentId = c.parentLocalId
         ? (localToClauseId.get(c.parentLocalId) ?? rootClauseId)
         : rootClauseId;
-      const pageStart = c.pageStart ?? section?.pageStart;
-      const pageEnd = c.pageEnd ?? section?.pageEnd;
+      const pageStart = c.pageStart ?? fallbackPageStart;
+      const pageEnd = c.pageEnd ?? fallbackPageEnd;
       out.clauses.push({
         id,
         standardId,

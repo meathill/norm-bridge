@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockAgentRunner } from '@agents/mock-agent-runner';
+import type { AgentCompileCallbacks, AgentCompileContext, AgentRunner } from '@agents/agent-runner';
 import { ArtifactStore } from '@main/services/artifact-store';
 import { ImportService } from '@main/services/import-service';
 import { JobBus } from '@main/services/job-bus';
@@ -228,6 +229,58 @@ describe('Schema compile (extract → mock agent → SQLite + artifacts)', () =>
       .prepare("SELECT standard_id FROM standard_catalog WHERE origin = 'imported'")
       .get() as { standard_id: string | null } | undefined;
     expect(importedCatalog?.standard_id).toBe(liveStandardId);
+  });
+
+  it('windows a section into multiple small bounded calls', async () => {
+    // Force tiny windows so even the small fixture splits into several calls.
+    process.env.NORMBRIDGE_BLOCKS_PER_CALL = '1';
+    process.env.NORMBRIDGE_WINDOWS_PER_SECTION = '999';
+    try {
+      const pdf = join(tmpRoot, 'standard.pdf');
+      writeFileSync(
+        pdf,
+        makeMinimalPdf({
+          lines: [
+            '1 Scope',
+            'This standard applies to circuit breakers.',
+            '1.1 General',
+            'The product shall be safe.',
+          ],
+        }),
+      );
+      const imp = await importService.importFile({ filePath: pdf, kind: 'standard_pdf' });
+      const extractStart = await jobService.startStandardExtract({ sourceId: imp.source.id });
+      await waitFinished(bus, extractStart.jobId);
+
+      // Spy runner: count calls and assert every call respects the 1-block window.
+      const mock = new MockAgentRunner();
+      let calls = 0;
+      let maxBlocksSeen = 0;
+      const spy: AgentRunner = {
+        id: 'spy',
+        compile: (ctx: AgentCompileContext, cb?: AgentCompileCallbacks) => {
+          calls += 1;
+          maxBlocksSeen = Math.max(maxBlocksSeen, ctx.textBlocks.length);
+          return mock.compile(ctx, cb);
+        },
+      };
+      const compileStart = await compileService.start({ sourceId: imp.source.id, runner: spy });
+      await waitFinished(bus, compileStart.jobId);
+
+      // Multiple blocks ⇒ multiple windowed calls, each capped at the window size.
+      expect(calls).toBeGreaterThan(1);
+      expect(maxBlocksSeen).toBeLessThanOrEqual(1);
+
+      // Records still land coherently (no crash, clauses present, ids unique).
+      const clauseIds = (
+        sqlite.prepare('SELECT id FROM clauses').all() as Array<{ id: string }>
+      ).map((r) => r.id);
+      expect(clauseIds.length).toBeGreaterThan(0);
+      expect(new Set(clauseIds).size).toBe(clauseIds.length);
+    } finally {
+      delete process.env.NORMBRIDGE_BLOCKS_PER_CALL;
+      delete process.env.NORMBRIDGE_WINDOWS_PER_SECTION;
+    }
   });
 
   it('refuses to compile when the source is not a standard PDF', async () => {

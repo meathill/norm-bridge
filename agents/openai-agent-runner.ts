@@ -19,7 +19,7 @@ import { isRetryableLlmError, withRetry } from './retry';
 // calls each re-sent the full text, which on a slow endpoint blew the timeout.
 
 const INSTRUCTIONS = `You compile one section of a technical-standard PDF into structured data.
-The user message contains text blocks tagged by page, e.g. "<page 12>\\n  [id] text".
+The user message contains text lines grouped by page, e.g. "<page 12>\\n  some text".
 Produce, in a SINGLE JSON object, three arrays:
 
 1. clauses — the clause tree. Detect headings ("N", "N.N", "01 74 19", "SECTION xx")
@@ -267,7 +267,9 @@ function blocksToPromptText(blocks: PdfTextBlock[], cap: number): string {
   for (const [page, list] of [...grouped.entries()].sort((a, b) => a[0] - b[0])) {
     out.push(`<page ${page}>`);
     for (const b of list) {
-      out.push(`  [${b.id}] ${b.text}`);
+      // No block-id prefix: the model cites by page + verbatim quote (we resolve
+      // the block by quote-matching), so ids were pure token bloat (~4× the text).
+      if (b.text.trim()) out.push(`  ${b.text}`);
     }
   }
   if (blocks.length > cap) {
