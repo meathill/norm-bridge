@@ -5,15 +5,20 @@ import { z } from 'zod';
  * output is parsed by us (not the provider's strict json_schema enforcement),
  * so we accept loose/partial shapes and normalize defaults in SchemaCompileService.
  *
+ * Every optional field uses `.nullish()` (not `.optional()`): models routinely
+ * emit `"field": null` for "absent" rather than omitting the key, and rejecting
+ * null would throw away an otherwise-valid window. Downstream code already treats
+ * null and undefined identically (via `??` and conditional spreads).
+ *
  * Citation anchors only require a verbatim `quote`; `page` and `textBlockIds` are
  * optional. The compiler resolves block ids by matching the quote against the
  * page's text blocks, because models can't reliably echo back our internal ids.
  */
 
 const citationAnchorSchema = z.object({
-  page: z.coerce.number().int().positive().optional(),
+  page: z.coerce.number().int().positive().nullish(),
   /** Optional: internal text-block ids, if the model echoed them. */
-  textBlockIds: z.array(z.string()).optional(),
+  textBlockIds: z.array(z.string()).nullish(),
   /** Verbatim quote, copied from the source text. */
   quote: z.string().min(1),
 });
@@ -22,36 +27,36 @@ const clauseCandidateSchema = z.object({
   /** Local id within the output, used to wire up parent-child links. */
   localId: z.string().min(1),
   parentLocalId: z.string().nullish(),
-  clauseNo: z.string().optional(),
-  title: z.string().optional(),
-  pageStart: z.coerce.number().int().positive().optional(),
-  pageEnd: z.coerce.number().int().positive().optional(),
-  rawText: z.string().optional(),
-  confidence: z.coerce.number().min(0).max(1).optional(),
-  citationAnchors: z.array(citationAnchorSchema).optional(),
+  clauseNo: z.string().nullish(),
+  title: z.string().nullish(),
+  pageStart: z.coerce.number().int().positive().nullish(),
+  pageEnd: z.coerce.number().int().positive().nullish(),
+  rawText: z.string().nullish(),
+  confidence: z.coerce.number().min(0).max(1).nullish(),
+  citationAnchors: z.array(citationAnchorSchema).nullish(),
 });
 
 const requirementCandidateSchema = z.object({
-  localClauseId: z.string().optional(),
-  subject: z.string().optional(),
-  appliesTo: z.string().optional(),
-  conditionText: z.string().optional(),
+  localClauseId: z.string().nullish(),
+  subject: z.string().nullish(),
+  appliesTo: z.string().nullish(),
+  conditionText: z.string().nullish(),
   requirementText: z.string().min(1),
-  parameterName: z.string().optional(),
-  operator: z.string().optional(),
-  valueText: z.string().optional(),
-  unit: z.string().optional(),
-  testMethod: z.string().optional(),
-  evidenceRequired: z.string().optional(),
-  severity: z.enum(['mandatory', 'recommended', 'informational']).optional(),
-  confidence: z.coerce.number().min(0).max(1).optional(),
-  citationAnchors: z.array(citationAnchorSchema).optional(),
+  parameterName: z.string().nullish(),
+  operator: z.string().nullish(),
+  valueText: z.string().nullish(),
+  unit: z.string().nullish(),
+  testMethod: z.string().nullish(),
+  evidenceRequired: z.string().nullish(),
+  severity: z.enum(['mandatory', 'recommended', 'informational']).nullish(),
+  confidence: z.coerce.number().min(0).max(1).nullish(),
+  citationAnchors: z.array(citationAnchorSchema).nullish(),
 });
 
 const referenceCandidateSchema = z.object({
-  fromLocalClauseId: z.string().optional(),
+  fromLocalClauseId: z.string().nullish(),
   referencedStandardCode: z.string().min(1),
-  referencedClause: z.string().optional(),
+  referencedClause: z.string().nullish(),
   relationType: z
     .enum([
       'normative',
@@ -62,9 +67,9 @@ const referenceCandidateSchema = z.object({
       'replaced_by',
       'unknown',
     ])
-    .optional(),
-  confidence: z.coerce.number().min(0).max(1).optional(),
-  citationAnchors: z.array(citationAnchorSchema).optional(),
+    .nullish(),
+  confidence: z.coerce.number().min(0).max(1).nullish(),
+  citationAnchors: z.array(citationAnchorSchema).nullish(),
 });
 
 export const clauseCompilerOutputSchema = z.object({

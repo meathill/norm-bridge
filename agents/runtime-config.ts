@@ -29,8 +29,13 @@ export type RuntimeAgentConfig = {
 };
 
 const DEFAULT_MODEL = 'gpt-4.1-mini';
-/** Per-request timeout. A hung third-party endpoint should fail loudly, not freeze the UI. */
-const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+/**
+ * Per-request timeout. Real compiles show legit responses reaching ~110-118s on
+ * slow endpoints (a window can emit 15-28k chars of clauses+requirements), so a
+ * 120s cap false-times-out borderline calls and wastes a cooldown+retry. 180s
+ * gives margin while still failing a genuinely hung endpoint loudly.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 180_000;
 /** Default 0: a slow endpoint that times out won't get better on retry — fail fast and surface it. */
 const DEFAULT_MAX_RETRIES = 0;
 /** Default to chat completions because most OpenAI-compatible third-party providers

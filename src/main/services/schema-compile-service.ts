@@ -500,7 +500,7 @@ export class SchemaCompileService {
       referenceOut,
       out,
     } = args;
-    const resolve = (anchors: CitationAnchor[] | undefined) =>
+    const resolve = (anchors: CitationAnchor[] | null | undefined) =>
       anchorsToCitations(
         anchors,
         source,
@@ -802,7 +802,7 @@ function normalizeForMatch(s: string): string {
  * quote) is always kept even when no block matches (bbox just stays absent).
  */
 function anchorsToCitations(
-  anchors: CitationAnchor[] | undefined,
+  anchors: CitationAnchor[] | null | undefined,
   source: SourceFile,
   blockIndex: Map<string, PdfTextBlock>,
   blocksByPage: Map<number, PdfTextBlock[]>,
